@@ -6,6 +6,15 @@ DeepSeek Harness（`dsh`）是由 [DeepSeek AI](https://deepseek.com) 开发的�
 
 它采用**一切皆插件**的架构，并由 [Cordis](https://github.com/cordiverse/cordis) 驱动，其设计参见论文 [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)。
 
+## 本 fork 的增强
+
+本 fork 在上游之上增加了两项第三方网关兼容性增强：
+
+- **网关 compat 预设** —— pi-ai 适配器的 `compat` 表面扩展到九个开关（含 `supportsDeveloperRole`），新增可选服务 `llm-gateway-compat-presets` 让插件按主机名钉住端点方言事实。配套插件 [`dsh-gateway-presets`](https://github.com/Menger-8/dsh-gateway-presets) 内置经实测的火山方舟条目。
+- **添加模型时自动能力探测** —— 通过 Web UI 添加模型时，用几个最小请求实测勾选模型，自动写入 `reasoningEfforts` 与路由 `compat` 事实，新渠道无需编辑 `settings.yaml` 即可出现思考强度选择器。
+
+完整报告见[上游 Discussion](https://github.com/deepseek-ai/deepseek-harness/discussions)。
+
 ## 开发者预览
 
 DeepSeek Harness 目前处于 _开发者预览_ 阶段，正在快速迭代。**未来将出现破坏兼容性的变更。**
