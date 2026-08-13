@@ -38,6 +38,18 @@ function textOf(model: ModelDraft, key: string): string {
   return typeof value === 'string' ? value : ''
 }
 
+/**
+ * Route-level compat facts a capability probe established. The owning card
+ * merges them into the profile's `compat` block, so a gateway that rejects
+ * the developer role — or needs a specific dialect or output-cap field — is
+ * corrected by the probe the user just ran, not by a later hand edit.
+ */
+export interface ProbeRouteFacts {
+  supportsDeveloperRole?: false
+  thinkingFormat?: string
+  maxTokensField?: 'max_tokens' | 'max_completion_tokens'
+}
+
 /** A row's numeric field, or `undefined` when unset or not a number. */
 function numberOf(model: ModelDraft, key: string): number | undefined {
   const value = model[key]
@@ -83,6 +95,12 @@ export interface ModelListEditorProps {
   probeBlocked?: keyof typeof en | undefined
   /** Wire face the fetch action calls. */
   api: Pick<IApiClient, 'llm'>
+  /**
+   * Report route-level compat facts the capability probe established, so the
+   * owning card can merge them into the profile's `compat` block. Called once
+   * per adopt when any picked model's probe found such a fact.
+   */
+  onProbeFacts?: (facts: ProbeRouteFacts) => void
   /** Section copy. */
   t: (key: keyof typeof en) => string
   /** Disable every control (read-only deployment or a pending write). */
@@ -143,13 +161,14 @@ function capacitySpelling(value: number | undefined): string {
   return value === undefined ? '' : formatCapacity(value)
 }
 
-/** Adopt a candidate, keeping whatever capacities the provider disclosed. */
+/** Adopt a candidate, keeping whatever capacities and reasoning levels the provider disclosed. */
 function adopt(candidate: DiscoveredModelView): ModelDraft {
   return {
     id: candidate.id,
     ...candidate.name === undefined ? {} : { name: candidate.name },
     ...candidate.contextWindow === undefined ? {} : { contextWindow: candidate.contextWindow },
     ...candidate.maxTokens === undefined ? {} : { maxTokens: candidate.maxTokens },
+    ...candidate.reasoning?.efforts === undefined ? {} : { reasoningEfforts: candidate.reasoning.efforts },
   }
 }
 
@@ -164,6 +183,8 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
   const [failure, setFailure] = useState<string | undefined>(undefined)
   const [candidates, setCandidates] = useState<readonly DiscoveredModelView[] | undefined>(undefined)
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set())
+  /** The last capability probe's outcome, shown under the model list until the picker reopens. */
+  const [probeNote, setProbeNote] = useState<string | undefined>(undefined)
   // Rows carry an id and a name; capacities are the exception, so they stay
   // folded until asked for rather than crowding every row with four inputs.
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set())
@@ -230,6 +251,8 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
   const fetchModels = async (): Promise<void> => {
     setBusy(true)
     setFailure(undefined)
+    // A fresh interrogation replaces the previous probe's note.
+    setProbeNote(undefined)
     try {
       const response = await api.llm.discoverModels({
         settingsNs: probe.settingsNs,
@@ -266,11 +289,70 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
     setPicked(new Set())
   }
 
-  const adoptPicked = (): void => {
+  const adoptPicked = async (): Promise<void> => {
     /* v8 ignore next -- the dialog only renders with candidates loaded */
     if (candidates === undefined) return
+    const pickedIds = [...picked]
+    // Probed entries replace their candidates, so adoption below reads the
+    // facts the endpoint just disclosed instead of re-asking anything.
+    let probed = candidates
+    if (pickedIds.length > 0) {
+      setBusy(true)
+      setFailure(undefined)
+      setProbeNote(undefined)
+      try {
+        const response = await api.llm.discoverModels({
+          settingsNs: probe.settingsNs,
+          ...probe.provider === undefined ? {} : { provider: probe.provider },
+          ...probe.baseURL === undefined || probe.baseURL.length === 0 ? {} : { baseURL: probe.baseURL },
+          ...probe.api === undefined ? {} : { api: probe.api },
+          ...probe.apiKey === undefined ? {} : { apiKey: probe.apiKey },
+          probeCapabilities: true,
+          models: pickedIds,
+        })
+        if (!response.result.ok) {
+          setProbeNote(t('probeNoteFailed').replace('{message}', response.result.error.message))
+        } else {
+          const facts: ProbeRouteFacts = {}
+          const summaries: string[] = []
+          const found = new Map(response.result.value.models.map(model => [model.id, model]))
+          for (const model of found.values()) {
+            const efforts = model.reasoning?.efforts
+            if (efforts !== undefined && Object.keys(efforts).length > 0) {
+              const levels = Object.keys(efforts)
+                .map(level => level.charAt(0).toUpperCase() + level.slice(1))
+                .join('/')
+              summaries.push(`${model.id} (${levels})`)
+            }
+            if (model.reasoning?.developerRole === 'rejected' && facts.supportsDeveloperRole === undefined) {
+              facts.supportsDeveloperRole = false
+            }
+            if (model.reasoning?.thinkingFormat !== undefined && facts.thinkingFormat === undefined) {
+              facts.thinkingFormat = model.reasoning.thinkingFormat
+            }
+            if (model.reasoning?.maxTokensField !== undefined && facts.maxTokensField === undefined) {
+              facts.maxTokensField = model.reasoning.maxTokensField
+            }
+          }
+          if (Object.keys(facts).length > 0) props.onProbeFacts?.(facts)
+          setProbeNote(summaries.length > 0
+            ? t('probeNoteProbed').replace('{summary}', summaries.join(', '))
+            : t('probeNoteNone'))
+          if (facts.supportsDeveloperRole === false) {
+            setProbeNote(current => [current, t('probeDeveloperFixed')].filter(Boolean).join(' '))
+          }
+          probed = candidates.map(candidate => found.get(candidate.id) ?? candidate)
+        }
+      } catch (error) {
+        // A failed probe must not block adoption: the rows join without
+        // reasoning levels, exactly as they did before probing existed.
+        setProbeNote(t('probeNoteFailed').replace('{message}', messageOf(error)))
+      } finally {
+        setBusy(false)
+      }
+    }
     const byId = new Map(models.map(model => [textOf(model, 'id'), model]))
-    for (const candidate of candidates) {
+    for (const candidate of probed) {
       if (!picked.has(candidate.id)) continue
       // A row the user already tuned wins over the provider's own numbers.
       // Keyed by id, so a half-typed row whose id is still empty is not a
@@ -431,6 +513,7 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
         {t('addModel')}
       </button>
       {failure !== undefined ? <p className={styles['error']}>{failure}</p> : null}
+      {probeNote !== undefined ? <p className={styles['probeNote']}>{probeNote}</p> : null}
       <Modal
         open={candidates !== undefined}
         onClose={closePicker}
@@ -440,8 +523,10 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
         className={styles['fetchDialog'] as string}
         footer={(
           <>
-            <Button variant="outline" onClick={closePicker}>{t('cancel')}</Button>
-            <Button variant="outline" onClick={adoptPicked}>{t('fetchAdopt')}</Button>
+            <Button variant="outline" onClick={closePicker} disabled={busy}>{t('cancel')}</Button>
+            <Button variant="outline" onClick={() => { void adoptPicked() }} disabled={busy}>
+              {busy ? t('probing') : t('fetchAdopt')}
+            </Button>
           </>
         )}
       >

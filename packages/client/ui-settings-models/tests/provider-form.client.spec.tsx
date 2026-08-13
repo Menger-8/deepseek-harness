@@ -479,6 +479,9 @@ describe('endpoint interrogation', () => {
     const boxes = [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
     expect(boxes.map(box => box.checked)).toEqual([false, true])
     fireEvent.click(screen.getByText(en.fetchAdopt))
+    // Adoption probes the picked models first; the apply below must wait for
+    // the rows to land.
+    await waitFor(() => { expect(screen.queryByText(en.fetchTitle)).toBeNull() })
 
     fireEvent.click(screen.getByText(en.apply))
     await waitFor(() => { expect(mutate).toHaveBeenCalled() })
@@ -555,6 +558,72 @@ describe('endpoint interrogation', () => {
     })
   })
 
+  it('probes a create card\u2019s draft with the typed key and no route', async () => {
+    const scripted = scriptedFace({
+      discover: vi.fn()
+        .mockResolvedValueOnce(ok({ models: [{ id: 'acme-large' }] }))
+        .mockResolvedValueOnce(ok({ models: [{ id: 'acme-large', reasoning: { failed: 'HTTP 401' } }] })),
+    })
+    render(
+      <CustomProviderCard
+        taken={[]} protocols={PROTOCOLS} revision={7} api={scripted.face as never}
+        t={t} readOnly={false} onClose={vi.fn()}
+      />,
+    )
+    fireEvent.change(screen.getByLabelText(en.baseUrl), { target: { value: 'https://acme.test/v1' } })
+    fireEvent.change(screen.getByLabelText(en.keyInput), { target: { value: 'typed-key' } })
+    fireEvent.click(screen.getByText(en.fetchModels))
+    await screen.findByText(en.fetchTitle)
+    fireEvent.click(screen.getByText(en.fetchAdopt))
+    await waitFor(() => { expect(screen.queryByText(en.fetchTitle)).toBeNull() })
+
+    // A draft has no route: the endpoint, protocol, and the one-shot key travel.
+    expect(scripted.discover.mock.calls[1]?.[0]).toEqual({
+      settingsNs: 'llm-pi-ai',
+      baseURL: 'https://acme.test/v1',
+      api: 'openai-completions',
+      apiKey: 'typed-key',
+      probeCapabilities: true,
+      models: ['acme-large'],
+    })
+  })
+
+  it('writes the probed route facts beside the profile a create card makes', async () => {
+    const scripted = scriptedFace({
+      discover: vi.fn()
+        .mockResolvedValueOnce(ok({ models: [{ id: 'acme-think' }] }))
+        .mockResolvedValueOnce(ok({
+          models: [{
+            id: 'acme-think',
+            reasoning: { efforts: { off: null, high: 'high' }, developerRole: 'rejected' },
+          }],
+        })),
+    })
+    render(
+      <CustomProviderCard
+        taken={[]} protocols={PROTOCOLS} revision={7} api={scripted.face as never}
+        t={t} readOnly={false} onClose={vi.fn()}
+      />,
+    )
+    fireEvent.change(screen.getByLabelText(en.customRoute), { target: { value: 'acme-gateway' } })
+    fireEvent.change(screen.getByLabelText(en.baseUrl), { target: { value: 'https://acme.test/v1' } })
+    fireEvent.change(screen.getByLabelText(en.keyInput), { target: { value: 'typed-key' } })
+    fireEvent.click(screen.getByText(en.fetchModels))
+    await screen.findByText(en.fetchTitle)
+    fireEvent.click(screen.getByText(en.fetchAdopt))
+    await waitFor(() => { expect(screen.queryByText(en.fetchTitle)).toBeNull() })
+    fireEvent.click(screen.getByText(en.create))
+
+    await waitFor(() => { expect(scripted.mutate).toHaveBeenCalled() })
+    const call = scripted.mutate.mock.calls[0]?.[0] as {
+      ops: Array<{ path: string[]; value: Record<string, unknown> }>
+    }
+    expect(call.ops[0]?.value).toMatchObject({
+      models: [{ id: 'acme-think', reasoningEfforts: { off: null, high: 'high' } }],
+      compat: { supportsDeveloperRole: false },
+    })
+  })
+
   it('folds a row\u2019s capacities away until they are asked for', async () => {
     await mountSection({
       providers: { openai: { baseURL: 'https://proxy.example/v1', models: [{ id: 'only' }] } },
@@ -597,11 +666,151 @@ describe('endpoint interrogation', () => {
     fireEvent.click(first)
     fireEvent.click(first)
     fireEvent.click(screen.getByText(en.fetchAdopt))
+    await waitFor(() => { expect(screen.queryByText(en.fetchTitle)).toBeNull() })
     fireEvent.click(screen.getByText(en.apply))
 
     await waitFor(() => { expect(mutate).toHaveBeenCalled() })
     // A disclosed output cap rides along with the candidate that has one.
     expect(firstMutate(mutate).ops[0]?.value).toEqual([{ id: 'a' }, { id: 'b', maxTokens: 2048 }])
+  })
+
+  it('probes the picked models on adoption and writes their levels and route facts', async () => {
+    const discover = vi.fn((payload: { probeCapabilities?: boolean }) =>
+      payload.probeCapabilities === true
+        ? Promise.resolve(ok({
+          models: [{
+            id: 'think',
+            name: 'Think',
+            reasoning: {
+              efforts: { off: null, high: 'high' },
+              developerRole: 'rejected',
+              thinkingFormat: 'deepseek',
+              maxTokensField: 'max_tokens',
+            },
+          }],
+        }))
+        : Promise.resolve(ok({ models: [{ id: 'think' }, { id: 'plain' }] })))
+    const { mutate } = await mountSection({
+      discover,
+      providers: {
+        openai: { baseURL: 'https://proxy.example/v1', compat: { thinkingFormat: 'openai' } },
+      },
+    })
+    openEditor('openai')
+
+    fireEvent.click(screen.getByText(en.fetchModels))
+    await screen.findByText(en.fetchTitle)
+    // Both candidates start checked; only the probed one stays picked.
+    const boxes = [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
+    fireEvent.click(boxes[1] as HTMLInputElement)
+    fireEvent.click(screen.getByText(en.fetchAdopt))
+    await waitFor(() => { expect(screen.queryByText(en.fetchTitle)).toBeNull() })
+
+    // The note names the probed levels and the automatic developer-role fix.
+    const combinedNote = `${en.probeNoteProbed.replace('{summary}', 'think (Off/High)')} ${en.probeDeveloperFixed}`
+    expect(screen.getByText(combinedNote)).toBeTruthy()
+
+    fireEvent.click(screen.getByText(en.apply))
+    await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+    const ops = firstMutate(mutate).ops
+    expect(ops.find(op => op.path.join('.') === 'providers.openai.models')?.value).toEqual([
+      { id: 'think', name: 'Think', reasoningEfforts: { off: null, high: 'high' } },
+    ])
+    // The probed facts merge into the compat block, the fresh empirical facts
+    // winning over a stale hand-written value for the same field.
+    expect(ops.find(op => op.path.join('.') === 'providers.openai.compat')?.value).toEqual({
+      thinkingFormat: 'deepseek',
+      supportsDeveloperRole: false,
+      maxTokensField: 'max_tokens',
+    })
+  })
+
+  it('adopts nothing and skips the probe when no candidate stays picked', async () => {
+    const discover = vi.fn(() => Promise.resolve(ok({ models: [{ id: 'a' }, { id: 'b' }] })))
+    const { mutate } = await mountSection({ discover })
+    openEditor('openai')
+
+    fireEvent.click(screen.getByText(en.fetchModels))
+    await screen.findByText(en.fetchTitle)
+    const boxes = [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
+    fireEvent.click(boxes[0] as HTMLInputElement)
+    fireEvent.click(boxes[1] as HTMLInputElement)
+    fireEvent.click(screen.getByText(en.fetchAdopt))
+    await waitFor(() => { expect(screen.queryByText(en.fetchTitle)).toBeNull() })
+
+    // Nothing was picked, so nothing was probed and nothing was adopted.
+    expect(discover).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByText(en.apply))
+    await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+    expect(firstMutate(mutate).ops[0]?.value).toEqual([])
+  })
+
+  it('probes without a route endpoint when the route has none', async () => {
+    const discover = vi.fn()
+      .mockResolvedValueOnce(ok({ models: [{ id: 'from-registry' }] }))
+      .mockResolvedValueOnce(ok({ models: [{ id: 'from-registry', reasoning: { developerRole: 'rejected' } }] }))
+    const { mutate } = await mountSection({ discover, providers: { openai: {} } })
+    openEditor('openai')
+
+    fireEvent.click(screen.getByText(en.fetchModels))
+    await screen.findByText(en.fetchTitle)
+    fireEvent.click(screen.getByText(en.fetchAdopt))
+    await waitFor(() => { expect(screen.queryByText(en.fetchTitle)).toBeNull() })
+
+    const probeCall = discover.mock.calls[1]?.[0] as Record<string, unknown>
+    expect(probeCall).toEqual({
+      settingsNs: 'llm-pi-ai',
+      provider: 'openai',
+      probeCapabilities: true,
+      models: ['from-registry'],
+    })
+    fireEvent.click(screen.getByText(en.apply))
+    await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+    const ops = firstMutate(mutate).ops
+    expect(ops.find(op => op.path.join('.') === 'providers.openai.models')?.value)
+      .toEqual([{ id: 'from-registry' }])
+    // The probed role fact lands in a compat block the profile did not have.
+    expect(ops.find(op => op.path.join('.') === 'providers.openai.compat')?.value)
+      .toEqual({ supportsDeveloperRole: false })
+  })
+
+  it('adopts without reasoning levels when the probe transport fails', async () => {
+    const discover = vi.fn()
+      .mockResolvedValueOnce(ok({ models: [{ id: 'plain' }] }))
+      .mockRejectedValueOnce(new Error('carrier down'))
+    const { mutate } = await mountSection({ discover })
+    openEditor('openai')
+
+    fireEvent.click(screen.getByText(en.fetchModels))
+    await screen.findByText(en.fetchTitle)
+    fireEvent.click(screen.getByText(en.fetchAdopt))
+    await waitFor(() => { expect(screen.queryByText(en.fetchTitle)).toBeNull() })
+
+    expect(screen.getByText(en.probeNoteFailed.replace('{message}', 'carrier down'))).toBeTruthy()
+
+    fireEvent.click(screen.getByText(en.apply))
+    await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+    // The refusal is a detour, not a dead end: the row joins without levels.
+    expect(firstMutate(mutate).ops[0]?.value).toEqual([{ id: 'plain' }])
+  })
+
+  it('adopts without facts when the probe is refused, naming the refusal', async () => {
+    const discover = vi.fn()
+      .mockResolvedValueOnce(ok({ models: [{ id: 'plain' }] }))
+      .mockResolvedValueOnce(fail('the endpoint refuses this model', 'model-discovery-failed'))
+    const { mutate } = await mountSection({ discover })
+    openEditor('openai')
+
+    fireEvent.click(screen.getByText(en.fetchModels))
+    await screen.findByText(en.fetchTitle)
+    fireEvent.click(screen.getByText(en.fetchAdopt))
+    await waitFor(() => { expect(screen.queryByText(en.fetchTitle)).toBeNull() })
+
+    expect(screen.getByText(en.probeNoteFailed.replace('{message}', 'the endpoint refuses this model'))).toBeTruthy()
+
+    fireEvent.click(screen.getByText(en.apply))
+    await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+    expect(firstMutate(mutate).ops[0]?.value).toEqual([{ id: 'plain' }])
   })
 })
 

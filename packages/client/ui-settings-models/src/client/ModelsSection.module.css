@@ -603,6 +603,13 @@ select.input {
   color: var(--dsw-alias-state-error-primary);
 }
 
+.probeNote {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
 .deleteDialog {
   width: min(480px, 100%);
 }

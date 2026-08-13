@@ -209,8 +209,48 @@ export interface LlmModelDiscoveryRequest {
   api?: string
   /** Credential for this interrogation alone; the harness never stores it. */
   apiKey?: string
+  /**
+   * Ask the adapter to probe each returned model's reasoning capability with
+   * small chat-completions requests and report the facts through
+   * {@link LlmDiscoveredModel.reasoning}. Absent, the interrogation is the
+   * listing alone. An adapter whose protocol has no probeable chat shape
+   * returns models without facts rather than failing the listing.
+   */
+  probeCapabilities?: boolean
+  /**
+   * Only probe — and, when `probeCapabilities` is set, only return — these
+   * model ids. A configuration surface names the candidates the user just
+   * picked, so a gateway listing thirty models costs a handful of requests
+   * instead of a probe per row.
+   */
+  models?: readonly string[]
   /** Caller cancellation; implementations must settle promptly after it aborts. */
   signal?: AbortSignal
+}
+
+/**
+ * Reasoning capability facts one endpoint disclosed about one model during a
+ * probed interrogation. Every field is optional because a probe can time out
+ * or be refused per model; a surface adopts what it got and owes the rest.
+ */
+export interface LlmDiscoveredReasoning {
+  /**
+   * Selectable thinking levels as `{ level: wire spelling }`, ready to store
+   * as a profile's `reasoningEfforts`. Absent means the probe confirmed no
+   * level the harness vocabulary can offer.
+   */
+  efforts?: Record<string, string | null>
+  /** Whether the endpoint accepted the `developer` system role for a reasoning request. */
+  developerRole?: 'accepted' | 'rejected'
+  /**
+   * The reasoning-dispatch format the endpoint needs, when the probe had to
+   * determine one; absent keeps pi-ai's URL-derived detection.
+   */
+  thinkingFormat?: string
+  /** The output-cap field the endpoint accepts, when the probe established it. */
+  maxTokensField?: 'max_tokens' | 'max_completion_tokens'
+  /** Short reason the probe could not complete for this model; absent when it did. */
+  failed?: string
 }
 
 /**
@@ -227,6 +267,8 @@ export interface LlmDiscoveredModel {
   contextWindow?: number
   /** Maximum output tokens, when disclosed. */
   maxTokens?: number
+  /** Reasoning facts a probed interrogation disclosed; absent when not probed. */
+  reasoning?: LlmDiscoveredReasoning
 }
 
 /** One adapter-discovered model; catalog membership is advisory, not request validation. */

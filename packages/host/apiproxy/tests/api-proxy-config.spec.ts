@@ -764,6 +764,38 @@ describe('llm.discoverModels', () => {
     expect(JSON.stringify(error)).not.toContain('wrong')
   })
 
+  it('passes a capability-probe request through and returns the probed facts', async () => {
+    const ctx = await harness()
+    let probe: unknown
+    ctx.llm.registerModelDiscovery('llm-pi-ai', (request_) => {
+      probe = request_
+      return Promise.resolve([{
+        id: 'acme-think',
+        reasoning: {
+          efforts: { off: null, high: 'high' },
+          developerRole: 'rejected',
+          maxTokensField: 'max_tokens',
+        },
+      }])
+    })
+    const api = createApiProxy(ctx, DEFAULTS)
+
+    const value = expectOk(await api.llm.discoverModels(request({
+      settingsNs: 'llm-pi-ai',
+      baseURL: 'https://gateway.acme.example/v1',
+      apiKey: 'probe-key',
+      probeCapabilities: true,
+      models: ['acme-think'],
+    })))
+
+    expect(probe).toMatchObject({ probeCapabilities: true, models: ['acme-think'] })
+    expect(value.models[0]?.reasoning).toEqual({
+      efforts: { off: null, high: 'high' },
+      developerRole: 'rejected',
+      maxTokensField: 'max_tokens',
+    })
+  })
+
   it('reports a namespace no adapter family serves', async () => {
     const ctx = await harness()
     const api = createApiProxy(ctx, DEFAULTS)

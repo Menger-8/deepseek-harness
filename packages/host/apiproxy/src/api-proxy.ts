@@ -3402,16 +3402,18 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async discoverModels(request, signal) {
-        const { settingsNs, provider, baseURL, api, apiKey } = request.payload
+        const { settingsNs, provider, baseURL, api, apiKey, probeCapabilities, models } = request.payload
         try {
-          const models = await ctx.llm.discoverModels(settingsNs, {
+          const found = await ctx.llm.discoverModels(settingsNs, {
             ...provider === undefined ? {} : { provider },
             ...baseURL === undefined ? {} : { baseURL },
             ...api === undefined ? {} : { api },
             ...apiKey === undefined ? {} : { apiKey },
+            ...probeCapabilities === undefined ? {} : { probeCapabilities },
+            ...models === undefined ? {} : { models },
             ...signal === undefined ? {} : { signal },
           })
-          return ok(request, { models })
+          return ok(request, { models: found })
         } catch (error: unknown) {
           // Every failure here is the user's next move, not a transport fault:
           // a wrong endpoint, a rejected key, or a protocol with no listing all

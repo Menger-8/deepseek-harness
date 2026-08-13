@@ -6,7 +6,7 @@
 import { z } from 'zod'
 import type { RequestPayload, ResponseValue } from './rpc-map.ts'
 import type { Wire } from './rpc.schema.ts'
-import type { ConfigurableProviderView, DiscoveredModelView } from './llm.ts'
+import type { ConfigurableProviderView, DiscoveredModelReasoning, DiscoveredModelView } from './llm.ts'
 import { modelCatalogFailureSchema, modelProviderGroupSchema } from './sessions.schema.ts'
 
 /** ConfigurableProviderView row of llm.providers. */
@@ -36,12 +36,22 @@ export const llmModelsValueSchema = z.object({
   failures: z.array(modelCatalogFailureSchema),
 }) satisfies z.ZodType<Wire<ResponseValue<'llm.models'>>>
 
+/** Reasoning facts one probed model disclosed. */
+export const discoveredModelReasoningSchema = z.object({
+  efforts: z.record(z.string(), z.union([z.string(), z.null()])).optional(),
+  developerRole: z.union([z.literal('accepted'), z.literal('rejected')]).optional(),
+  thinkingFormat: z.string().min(1).optional(),
+  maxTokensField: z.union([z.literal('max_tokens'), z.literal('max_completion_tokens')]).optional(),
+  failed: z.string().min(1).optional(),
+}) satisfies z.ZodType<Wire<DiscoveredModelReasoning>>
+
 /** DiscoveredModelView row of llm.discoverModels. */
 export const discoveredModelViewSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1).optional(),
   contextWindow: z.number().int().positive().optional(),
   maxTokens: z.number().int().positive().optional(),
+  reasoning: discoveredModelReasoningSchema.optional(),
 }) satisfies z.ZodType<Wire<DiscoveredModelView>>
 
 /** llm.discoverModels request payload. */
@@ -56,6 +66,8 @@ export const llmDiscoverModelsRequestSchema = z.object({
   // `subscribeEnvelopes()` observers can see — redacting that tap is a
   // configuration-plane-wide change, not this method's to make alone.
   apiKey: z.string().min(1).optional(),
+  probeCapabilities: z.boolean().optional(),
+  models: z.array(z.string().min(1)).optional(),
 }) satisfies z.ZodType<Wire<RequestPayload<'llm.discoverModels'>>>
 
 /** llm.discoverModels response value. */

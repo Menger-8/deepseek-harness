@@ -28,7 +28,7 @@ import { apiKeyFailure } from './apiKey.ts'
 import { EditorFooter } from './EditorFooter.tsx'
 import { validateDeepSeekModels } from './DeepSeekModelsEditor.tsx'
 import { ModelListEditor } from './ModelListEditor.tsx'
-import type { ModelDraft } from './ModelListEditor.tsx'
+import type { ModelDraft, ProbeRouteFacts } from './ModelListEditor.tsx'
 import { deriveKeyRef, messageOf } from './store.ts'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
@@ -84,6 +84,12 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
   const [protocol, setProtocol] = useState(protocols[0] ?? '')
   const [keyDraft, setKeyDraft] = useState('')
   const [models, setModels] = useState<readonly ModelDraft[]>([])
+  /**
+   * Route-level compat facts the capability probe established, written beside
+   * the profile the card creates — the same merge the editor card performs,
+   * because a create has no existing compat block to merge into.
+   */
+  const [compat, setCompat] = useState<Record<string, unknown>>({})
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | undefined>(undefined)
   /**
@@ -143,6 +149,7 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
         api: protocol,
         baseURL,
         models: models.map(model => ({ ...model })),
+        ...Object.keys(compat).length === 0 ? {} : { compat: { ...compat } },
       }
       const response = await api.settings.mutate({
         ns: NS,
@@ -277,6 +284,9 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
         api={api}
         t={t}
         disabled={profileDisabled}
+        onProbeFacts={(facts: ProbeRouteFacts) => {
+          setCompat(current => ({ ...current, ...facts }))
+        }}
       />
       {failure !== undefined ? <p className={styles['error']}>{failure}</p> : null}
       {/* Only the gates with something to say render; the route-id gate has its

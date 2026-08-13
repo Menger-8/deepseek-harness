@@ -553,6 +553,7 @@ export class LlmRuntime extends Service {
         ...model.name === undefined ? {} : { name: model.name },
         ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
         ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
+        ...model.reasoning === undefined ? {} : { reasoning: { ...model.reasoning } },
       })
     }
     return models

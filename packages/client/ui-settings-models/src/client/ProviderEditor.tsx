@@ -33,6 +33,7 @@ import {
 import { apiKeyFailure } from './apiKey.ts'
 import { EditorFooter } from './EditorFooter.tsx'
 import { ModelListEditor } from './ModelListEditor.tsx'
+import type { ProbeRouteFacts } from './ModelListEditor.tsx'
 import { deriveKeyRef, messageOf, protocolChoices } from './store.ts'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
@@ -357,6 +358,19 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
       },
       onReset: () => { setDraft(current => deletePath(current, ['models'])) },
     }
+    // Facts the capability probe established for this endpoint merge into the
+    // profile's compat block, the fresh empirical facts winning over a stale
+    // hand-written value for the same field; the probe only fills what the
+    // form itself cannot know.
+    const onProbeFacts = (facts: ProbeRouteFacts): void => {
+      setDraft((current) => {
+        const existing = getPath(current, ['compat'])
+        const base = typeof existing === 'object' && existing !== null && !Array.isArray(existing)
+          ? existing as Record<string, unknown>
+          : {}
+        return setPath(current, ['compat'], { ...base, ...facts })
+      })
+    }
     return (
       <>
         <div className={styles['field']}>
@@ -460,7 +474,15 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
                   defaultMaxTokens={typeof defaultMaxTokens === 'number' ? defaultMaxTokens : undefined}
                 />
               )
-              : <ModelListEditor {...catalogProps} probe={probe} probeBlocked={keyFailure} api={api} />}
+              : (
+                <ModelListEditor
+                  {...catalogProps}
+                  probe={probe}
+                  probeBlocked={keyFailure}
+                  api={api}
+                  onProbeFacts={onProbeFacts}
+                />
+              )}
           </div>
         </details>}
       </>

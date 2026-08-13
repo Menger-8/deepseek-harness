@@ -30,6 +30,10 @@ import {
 } from '../src/api/workspace.schema.ts'
 import { skillEntrySchema, skillListRequestSchema, skillListValueSchema } from '../src/api/skills.schema.ts'
 import {
+  discoveredModelReasoningSchema, discoveredModelViewSchema,
+  llmDiscoverModelsRequestSchema, llmDiscoverModelsValueSchema,
+} from '../src/api/llm.schema.ts'
+import {
   agentPresetEntrySchema, agentPresetListValueSchema, agentPresetOpenDocumentValueSchema,
 } from '../src/api/agent-presets.schema.ts'
 import { hostFrameSchema, muxFrameSchema, askUserQuestionItemSchema } from '../src/api/events.schema.ts'
@@ -566,5 +570,40 @@ describe('agent-preset schemas', () => {
       .toEqual({ opened: false, path: '/presets/mine' })
     // A closed reply must carry the path the surface shows instead.
     expect(() => agentPresetOpenDocumentValueSchema.parse({ opened: false })).toThrow()
+  })
+})
+
+describe('llm discovery schemas', () => {
+  it('accepts a capability-probe request and the probed facts it returns', () => {
+    expect(llmDiscoverModelsRequestSchema.parse({
+      settingsNs: 'llm-pi-ai',
+      probeCapabilities: true,
+      models: ['acme-think'],
+    })).toEqual({ settingsNs: 'llm-pi-ai', probeCapabilities: true, models: ['acme-think'] })
+
+    const view = discoveredModelViewSchema.parse({
+      id: 'acme-think',
+      reasoning: {
+        efforts: { off: null, high: 'high' },
+        developerRole: 'rejected',
+        thinkingFormat: 'deepseek',
+        maxTokensField: 'max_tokens',
+        failed: 'HTTP 401',
+      },
+    })
+    expect(view.reasoning).toEqual({
+      efforts: { off: null, high: 'high' },
+      developerRole: 'rejected',
+      thinkingFormat: 'deepseek',
+      maxTokensField: 'max_tokens',
+      failed: 'HTTP 401',
+    })
+    expect(llmDiscoverModelsValueSchema.parse({ models: [view] }).models[0]?.id).toBe('acme-think')
+  })
+
+  it('rejects a probed fact outside its vocabulary and a non-string picked id', () => {
+    expect(() => discoveredModelReasoningSchema.parse({ developerRole: 'maybe' })).toThrow()
+    expect(() => discoveredModelReasoningSchema.parse({ maxTokensField: 'max_new_tokens' })).toThrow()
+    expect(() => llmDiscoverModelsRequestSchema.parse({ settingsNs: 'llm-pi-ai', models: [42] })).toThrow()
   })
 })

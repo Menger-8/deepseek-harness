@@ -26,6 +26,8 @@ import { INVALID_CREDENTIAL_CODE, LlmError, normalizeApiKey } from '@deepseek-ai
 import type { LlmDiscoveredModel, LlmModelDiscoveryRequest } from '@deepseek-ai/dsh-llm'
 import { attributionHeaders } from '@deepseek-ai/dsh-llm'
 import { catalogModels } from './catalog.ts'
+import { probeModelCapabilities } from './probe.ts'
+import type { ModelProbeSpec } from './probe.ts'
 
 /**
  * Protocols whose model listing this module can read: the two that speak
@@ -181,14 +183,17 @@ function usableProbeKey(raw: string): string {
 }
 
 /**
- * Interrogate one draft provider endpoint for the models it advertises.
+ * Interrogate one draft provider endpoint for the models it advertises. With
+ * `probeCapabilities` set, the models named by `models` (or every listed one
+ * when omitted) are also probed for their reasoning capability through a few
+ * small chat-completions requests, and the facts ride each model's `reasoning`.
  * @param request - the endpoint, protocol, and one-shot credential to use.
  * @param storedApiKey - the credential the named route already stored, asked
  *   for only when the draft carries none and only on the path that reaches the
  *   network. A configuration surface never holds a stored secret — it edits a
  *   redacted descriptor — so without this an already-configured route would be
  *   interrogated unauthenticated and answer 401.
- * @returns the advertised models in endpoint order.
+ * @returns the advertised models in endpoint order, probed facts attached.
  * @throws LlmError when the protocol has no readable listing, the endpoint
  *   refuses or fails the request, or the reply is not a model listing.
  */
@@ -280,5 +285,52 @@ export async function discoverModels(
   } catch (error: unknown) {
     throw new LlmError(`${url} did not answer with JSON`, 'DISCOVERY_FAILED', { cause: error })
   }
-  return readListing(body)
+  const listed = readListing(body)
+  if (request.probeCapabilities !== true || api !== 'openai-completions') {
+    // Probing is the one per-model chat shape this adapter can read; a protocol
+    // without it keeps the listing answer, facts absent.
+    return listed
+  }
+  const wanted = request.models
+  const picked = wanted === undefined ? listed : listed.filter(model => wanted.includes(model.id))
+  if (picked.length === 0) return picked
+  const spec: Omit<ModelProbeSpec, 'model'> = { baseURL: request.baseURL }
+  if (apiKey !== undefined) spec.apiKey = apiKey
+  if (request.signal !== undefined) spec.signal = request.signal
+  return probePicked(picked, spec)
+}
+
+/**
+ * Probe the picked models' reasoning capability with a bounded worker pool,
+ * attaching each model's facts — or its short failure — to its entry.
+ * @param models - the listed models to probe, already filtered to the picked ids.
+ * @param spec - the frozen endpoint facts shared by every probe.
+ * @returns the models with their probed `reasoning` facts attached.
+ */
+async function probePicked(
+  models: readonly LlmDiscoveredModel[],
+  spec: Omit<ModelProbeSpec, 'model'>,
+): Promise<readonly LlmDiscoveredModel[]> {
+  const results = new Array<LlmDiscoveredModel>(models.length)
+  let next = 0
+  const workers = Array.from({ length: Math.min(2, models.length) }, async () => {
+    while (next < models.length) {
+      if (spec.signal?.aborted) {
+        throw new LlmError('model discovery aborted by caller', 'ABORTED')
+      }
+      const index = next++
+      const model = models[index]
+      /* v8 ignore next 3 -- the while bound keeps the index inside the array; the guard answers noUncheckedIndexedAccess. */
+      if (model === undefined) continue
+      results[index] = {
+        id: model.id,
+        ...model.name === undefined ? {} : { name: model.name },
+        ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
+        ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
+        reasoning: await probeModelCapabilities({ ...spec, model: model.id }),
+      }
+    }
+  })
+  await Promise.all(workers)
+  return results
 }

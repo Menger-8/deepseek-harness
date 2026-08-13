@@ -71,9 +71,27 @@ export interface LlmApi {
       baseURL?: string
       api?: string
       apiKey?: string
+      /** Probe each returned model's reasoning capability; see {@link DiscoveredModelReasoning}. */
+      probeCapabilities?: boolean
+      /** Only probe — and only return — these model ids when probing. */
+      models?: string[]
     }>,
     signal?: AbortSignal,
   ): Promise<RpcResponse<{ models: DiscoveredModelView[] }>>
+}
+
+/** Reasoning capability facts one probed model disclosed. */
+export interface DiscoveredModelReasoning {
+  /** Selectable thinking levels as `{ level: wire spelling }`. */
+  efforts?: Record<string, string | null>
+  /** Whether the endpoint accepted the `developer` system role. */
+  developerRole?: 'accepted' | 'rejected'
+  /** Reasoning-dispatch format the endpoint needs, when the probe determined one. */
+  thinkingFormat?: string
+  /** Output-cap field the endpoint accepts, when the probe established it. */
+  maxTokensField?: 'max_tokens' | 'max_completion_tokens'
+  /** Short reason the probe could not complete; absent when it did. */
+  failed?: string
 }
 
 /** Wire view of one model an interrogated endpoint advertises. */
@@ -86,4 +104,6 @@ export interface DiscoveredModelView {
   contextWindow?: number
   /** Maximum output tokens, when disclosed. */
   maxTokens?: number
+  /** Reasoning facts a probed interrogation disclosed; absent when not probed. */
+  reasoning?: DiscoveredModelReasoning
 }
