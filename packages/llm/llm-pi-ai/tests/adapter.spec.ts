@@ -660,6 +660,58 @@ describe('provider profile lifecycle', () => {
     expect(server.requests[0]).not.toHaveProperty('reasoning_effort')
   })
 
+  it('keeps the system role while sending reasoning_effort when a gateway preset pins no developer role', async () => {
+    vi.stubEnv('PI_TEST_KEY', 'test-key')
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = new Context()
+    // The Ark-shaped gateway: an OpenAI-compatible endpoint pi-ai's detection
+    // guesses the developer role for, while the gateway itself accepts only
+    // `system` — the preset pins the one fact the URL cannot say. Provided
+    // before the adapter mounts, exactly as the shipped presets plugin does.
+    ctx.provide(LlmPiAi.LLM_GATEWAY_COMPAT_PRESETS, {
+      revision: 0,
+      register: () => {
+        throw new Error('the shipped provider registers at boot, not per request')
+      },
+      match: (baseURL: string) => new URL(baseURL).hostname === '127.0.0.1'
+        ? { supportsDeveloperRole: false }
+        : undefined,
+    })
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'acme-gateway': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          api: 'openai-completions',
+          baseURL: `${server.url}/v1`,
+          models: [{
+            id: 'acme-think',
+            contextWindow: 65_536,
+            maxTokens: 4096,
+            reasoningEfforts: { off: null, high: 'high', max: 'max' },
+          }],
+        },
+      },
+    })
+
+    await assemble(ctx, {
+      provider: 'acme-gateway',
+      model: 'acme-think',
+      reasoningEffort: ReasoningEffortId('high'),
+      system: 'You are concise.',
+      messages: [],
+    })
+    // A reasoning model pi-ai would otherwise serialize as `developer`; the
+    // preset keeps the role `system`, which is the dialect this endpoint
+    // accepts — and the effort still reaches the wire alongside it.
+    const body = server.requests[0] as {
+      messages: Array<{ role: string; content: string }>
+      reasoning_effort?: string
+    }
+    expect(body.messages[0]).toEqual({ role: 'system', content: 'You are concise.' })
+    expect(body).toMatchObject({ reasoning_effort: 'high' })
+  })
+
   it('accepts absent credentials for pi-ai ambient authentication', async () => {
     vi.stubEnv('DEEPSEEK_API_KEY', 'ambient-key')
     const server = await mockServer([{ events: textEvents }])

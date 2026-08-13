@@ -95,6 +95,14 @@
     - id: llm-pi-ai
       name: '@deepseek-ai/dsh-llm-pi-ai'
 
+    # Gateway compat presets feeding the pi-ai adapter's URL detection gaps:
+    # the shipped set pins protocol facts for well-known third-party endpoints
+    # (Volcengine Ark and friends) by hostname, and `presets:` config extends
+    # or replaces entries. Optional for the adapter; a deployment that composes
+    # none describes every gateway from its `llm-pi-ai:` profile `compat`.
+    - id: llm-gateway-presets
+      name: '@deepseek-ai/dsh-llm-gateway-presets'
+
     - id: session-persistence-jsonl
       name: '@deepseek-ai/dsh-session-persistence-jsonl'
       config:

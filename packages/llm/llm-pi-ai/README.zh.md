@@ -87,7 +87,9 @@ profile 的 `models` 列表是*替换*该路由已安装 catalog，而不是扩�
 
 ### 推理分派的 compat 开关
 
-思考级别如何在协议中传输——单独一个 `reasoning_effort`、DeepSeek 的 `thinking: {type}` 加上档位、z.ai 的 `thinking` 对象，诸如此类——就是 pi-ai 的 `compat.thinkingFormat`，pi-ai 会从端点 URL 猜测它；私有网关的 URL 什么也说明不了，于是说 DeepSeek 方言的网关只会收到 OpenAI 方言的请求，且无从更正。因此 `compat.thinkingFormat` 与 `compat.supportsReasoningEffort` 既可配置在路由上（作为其模型的默认值），也可按模型配置（逐字段胜出），解析顺序为模型 → 路由 → 已安装 catalog 条目 → pi-ai 按 URL 得出的猜测；设置路由级开关会为路由上的每个模型遮蔽 catalog 条目的值，而且除了重述其值，没有任何写法能把某个字段交还给 catalog。`thinkingFormat` 接受 pi-ai 可分派的各种格式，但不含两个 `chat-template` 变体：它们需要的 `chatTemplateKwargs` 本配置并不暴露。两个开关都只存在于 `openai-completions` 上——其余协议的推理形状由协议本身承载——因此在其他协议的模型上设置模型级开关会使解析失败，路由级开关会跳过其他协议的模型，而完全没有 `openai-completions` 模型的路由则会被拒绝。pi-ai compat 面的其余部分（`supportsStore`、`maxTokensField`……）保持自动检测，特意不在此处开放配置。
+思考级别如何在协议中传输——单独一个 `reasoning_effort`、DeepSeek 的 `thinking: {type}` 加上档位、z.ai 的 `thinking` 对象，诸如此类——就是 pi-ai 的 `compat.thinkingFormat`，pi-ai 会从端点 URL 猜测它；私有网关的 URL 什么也说明不了，于是说 DeepSeek 方言的网关只会收到 OpenAI 方言的请求，且无从更正。除推理分派外，OpenAI 兼容网关还会在另一小批协议事实上各说各话，pi-ai 同样按 URL 猜：系统提示用 `system` 还是 `developer`（`supportsDeveloperRole`，火山方舟只接受前者）、输出上限字段用 `max_tokens` 还是 `max_completion_tokens`（`maxTokensField`）、是否接受 `store`（`supportsStore`）、工具结果是否必须带 `name`（`requiresToolResultName`）、工具结果后的用户消息之前是否要垫一条 assistant 消息（`requiresAssistantAfterToolResult`）、思考块是否必须写成 `<thinking>` 定界文本（`requiresThinkingAsText`）、推理开启时回放的 assistant 消息是否要回显空 `reasoning_content`（`requiresReasoningContentOnAssistantMessages`）。这九个开关既可在路由上配置（作为其模型的默认值），也可按模型配置（逐字段胜出）。解析顺序为模型 → 路由 → 网关预设 → 已安装 catalog 条目 → pi-ai 按 URL 得出的猜测；设置路由级开关会为路由上的每个模型遮蔽 catalog 条目的值，而且除了重述其值，没有任何写法能把某个字段交还给 catalog。`thinkingFormat` 接受 pi-ai 可分派的各种格式，但不含两个 `chat-template` 变体：它们需要的 `chatTemplateKwargs` 本配置并不暴露。九个开关都只存在于 `openai-completions` 上——其余协议的推理形状由协议本身承载——因此在其他协议的模型上设置模型级开关会使解析失败，路由级开关与网关预设会跳过其他协议的模型，而完全没有 `openai-completions` 模型的路由会拒绝路由级开关。pi-ai compat 面的其余部分（grammar 工具、strict 模式、cache 控制格式、会话亲和、路由方言）保持自动检测，特意不在此处开放配置。
+
+**网关预设**把这九个开关交给插件维护。可选的 `llm-gateway-compat-presets` 服务是端点主机名到 compat 事实的注册表：任何插件都可以 `ctx.provide` 一份，适配器在解析每条路由时按路由实际指向的主机名询问它，命中的预设落在显式 `compat` 之下、catalog 条目之上——它描述的是端点，所以比「路由已改指、catalog 仍按老假设作答」更可信。shipped 组合挂载的 [`dsh-llm-gateway-presets`](https://www.npmjs.com/package/@deepseek-ai/dsh-llm-gateway-presets) 提供该服务，并内置经实测的火山方舟条目（`*.volces.com` → `supportsDeveloperRole: false`）；部署经其 `presets` 配置扩展或替换，社区网关知识作为该包的数据贡献或提供自己注册表的插件，因此新渠道不再需要动核心。预设只钉住 compat 事实，不能声明推理档位——那始终是 `reasoningEfforts` 的按模型能力。
 
 条目与已安装 catalog 都没有给出尺寸的模型，会采用该路由的 `defaultContextWindow`（262,144）与 `defaultMaxTokens`（32,768），因此一份只公布 id 的列表同样能产出可服务的路由。两个回退值本质上都是猜测，这正是它们作为路由字段、供网关服务更小模型的部署一次性更正的原因，而不是埋在适配器里的常量；回退值只用于给模型定尺寸，绝不会变成单次请求上限。
 
@@ -129,6 +131,8 @@ profile 的 `models` 列表是*替换*该路由已安装 catalog，而不是扩�
 询问只读 `openai-completions` 与 `openai-responses`，它们「`GET /models` + bearer 认证」的形状是网关、自建服务与官方端点三方一致认可的那一种。Azure 尽管出身 OpenAI 也被排除——它用 `api-key` 标头认证并要求 `api-version` 查询参数——Codex 则走 OAuth；其余协议一律以 `DISCOVERY_UNSUPPORTED` 回答，让界面回退到手工填写，而不是把认证失败报成一个没有模型的提供方。`baseURL` 按前缀而非待解析 URL 处理，因此 `https://gateway.example/openai/v1` 这类部署路径会保留其路径段。
 
 多数列表只公布 id；`context_window`/`context_length` 与 `max_output_tokens`/`max_tokens` 在网关提供时会被读取，没有可用 id 的条目会被跳过而不是让整份列表失败，其余仍由采纳方补齐。回复在四兆字节上限下读取，且上限落在实际收到的字节上——端点是用户自己填的 URL，因此会先看声明长度，但绝不把它当作边界。端点不可达、凭据被拒、响应非 JSON、以及响应没有 `data` 数组，都会以 `DISCOVERY_FAILED` 失败，消息点名端点；仅当 401 或 403 时才点名凭据。读取响应体期间被取消会呈现为 `ABORTED`，与请求发出之前被取消一致。
+
+带 `probeCapabilities` 时，询问还会对 `models` 点名的模型（省略则全部列出的模型）各用几个最小 `openai-completions` 请求探测其推理能力，每个模型的结论随其 `reasoning` 返回——可选的思考档位（`{ 档位: 线上拼写 }`）、端点是否接受 `developer` 系统角色、OpenAI 方言被拒时端点所需的 `thinkingFormat`、其接受的输出上限字段（`max_tokens` 或 `max_completion_tokens`），或简短的 `failed` 原因。只有 `openai-completions` 具备可探测的对话形状；其他协议保持列表回答、不带任何结论。裁决永远是状态码——2xx 接受、400 拒绝该参数、其余只让该模型的探测失败而不会连累列表——因此被拒的参数绝不会被误读为端点不可达，而采纳方会把确认过的档位写进 `reasoningEfforts`、把方言事实写进 `compat`，而不是要求用户自己知道这些。
 
 ## 提供方／模型路由与回放
 

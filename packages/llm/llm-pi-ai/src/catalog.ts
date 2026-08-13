@@ -183,19 +183,37 @@ export function catalogModels(provider: string): Map<string, Model<Api>> {
 export type PiAiReasoningEfforts = Partial<Record<ModelThinkingLevel, string | null>>
 
 /**
- * Reasoning-dispatch compatibility switches, set on the route (its models'
- * default) or per model (winning over the route). Only the switches pi-ai's
- * reasoning dispatch reads are offered; the rest of pi-ai's compat surface
- * keeps its baseURL-derived auto-detection. pi-ai types both fields only on
- * `OpenAICompletionsCompat` — the other wire protocols define their reasoning
- * fields in the protocol itself — so resolution rejects a model-level switch
- * anywhere else, while a route-level default skips past models it cannot fit.
+ * The `openai-completions` compatibility switches a profile (route, model) or
+ * a gateway preset may pin, set on the route (its models' default) or per
+ * model (winning over the route). The offered set covers the endpoint-dialect
+ * facts a gateway switch changes for chat — reasoning dispatch, the system
+ * role, the output-cap field, and the reasoning/tool-result replay rules.
+ * The rest of pi-ai's compat surface (grammar tools, strict mode, cache
+ * control formats, session affinity, and the routing dialects) keeps its
+ * baseURL-derived auto-detection. pi-ai types these fields only on
+ * `OpenAICompletionsCompat` — the other wire protocols define their own
+ * fields — so resolution rejects a model-level switch anywhere else, while a
+ * route-level default or a preset skips past models it cannot fit.
  */
 export interface PiAiCompatProfile {
   /** Reasoning parameter format the endpoint expects; absent keeps the catalog entry's, then pi-ai's baseURL-derived guess. */
   thinkingFormat?: PiAiThinkingFormat
   /** Whether the endpoint accepts `reasoning_effort`; absent keeps the catalog entry's, then pi-ai's baseURL-derived guess. */
   supportsReasoningEffort?: boolean
+  /** Whether the endpoint accepts `store`; absent keeps the catalog entry's, then pi-ai's baseURL-derived guess. */
+  supportsStore?: boolean
+  /** Whether the endpoint accepts the `developer` system role instead of `system`; absent keeps the guess. */
+  supportsDeveloperRole?: boolean
+  /** Which field caps output tokens; absent keeps the catalog entry's, then pi-ai's baseURL-derived guess. */
+  maxTokensField?: NonNullable<OpenAICompletionsCompat['maxTokensField']>
+  /** Whether tool results require a `name`; absent keeps the guess. */
+  requiresToolResultName?: boolean
+  /** Whether a user message after tool results needs an assistant message in between; absent keeps the guess. */
+  requiresAssistantAfterToolResult?: boolean
+  /** Whether thinking blocks must be sent as `<thinking>`-delimited text instead of a reasoning channel; absent keeps the guess. */
+  requiresThinkingAsText?: boolean
+  /** Whether replayed assistant messages must echo an empty `reasoning_content` while reasoning is enabled; absent keeps the guess. */
+  requiresReasoningContentOnAssistantMessages?: boolean
 }
 
 /** One configured model entry: an id plus the catalog fields it overrides. */
@@ -258,8 +276,16 @@ export interface RouteCatalogRequest {
   models?: readonly PiAiModelProfile[]
   /** Installed-catalog customizations by model id; only meaningful while `models` is absent. */
   modelOverrides?: Readonly<Record<string, PiAiModelOverride>>
-  /** Reasoning-dispatch switches for every `openai-completions` model on the route; entries override per field. */
+  /** Compatibility switches for every `openai-completions` model on the route; entries override per field. */
   compat?: PiAiCompatProfile
+  /**
+   * The gateway preset matched against this route's endpoint, from the
+   * optional `llm-gateway-compat-presets` service. It pins facts the profile
+   * did not state for every `openai-completions` model on the route, under
+   * explicit `compat` but over the installed catalog entry and pi-ai's
+   * baseURL-derived detection.
+   */
+  presetCompat?: PiAiCompatProfile
   /** Context capacity for a model neither the entry nor the catalog sizes. */
   defaultContextWindow: number
   /** Output capability for a model neither the entry nor the catalog sizes. */
@@ -369,18 +395,59 @@ function resolveModelReasoning(
 }
 
 /**
- * Resolve one model's compat block from the profile's reasoning switches.
+ * The compat fields a profile may pin, in field order. The literal list is the
+ * drift gate for the exposed surface: every `PiAiCompatProfile` field must
+ * appear here, and a pi-ai upgrade that adds an `OpenAICompletionsCompat`
+ * field neither narrows nor silently widens what configuration can state.
+ */
+const COMPAT_FIELDS = [
+  'thinkingFormat',
+  'supportsReasoningEffort',
+  'supportsStore',
+  'supportsDeveloperRole',
+  'maxTokensField',
+  'requiresToolResultName',
+  'requiresAssistantAfterToolResult',
+  'requiresThinkingAsText',
+  'requiresReasoningContentOnAssistantMessages',
+] as const satisfies readonly (keyof PiAiCompatProfile)[]
+
+/**
+ * The compat fields one profile layer states, or `undefined` when it states
+ * none. Splitting entry and route keeps their different failure postures
+ * expressible: an entry-level switch on a non-`openai-completions` model fails
+ * resolution, while a route-level default skips past models it cannot fit.
+ * @param source - the compat block to read, entry or route.
+ * @returns the fields the source names, or `undefined` when it names none.
+ */
+function statedCompat(source: PiAiCompatProfile | undefined): PiAiCompatProfile | undefined {
+  if (source === undefined) return undefined
+  const stated = Object.fromEntries(
+    COMPAT_FIELDS.flatMap((field) => {
+      const value = source[field]
+      return value === undefined ? [] : [[field, value] as const]
+    }),
+  ) as PiAiCompatProfile
+  return Object.keys(stated).length === 0 ? undefined : stated
+}
+
+/**
+ * Resolve one model's compat block from the profile's compat switches and the
+ * route's gateway preset.
  *
  * A model switch wins over the route switch; whatever neither sets keeps the
- * installed entry's value, and a field no layer decides falls through to
- * pi-ai's baseURL-derived detection. Only an `openai-completions` model takes
- * the switches at all: a model-level switch on any other protocol fails
- * resolution, while a route-level default skips past such models — the same
- * posture as the route-level `reasoning` default, which also must not fail
- * models it does not fit.
+ * gateway preset, then the installed entry's value, and a field no layer
+ * decides falls through to pi-ai's baseURL-derived detection. A preset
+ * describes the endpoint the route's `baseURL` actually names, so it beats a
+ * catalog entry the repointed route no longer speaks for. Only an
+ * `openai-completions` model takes the switches at all: a model-level switch
+ * on any other protocol fails resolution, while a route-level default or a
+ * preset skips past such models — the same posture as the route-level
+ * `reasoning` default, which also must not fail models it does not fit.
  * @param provider - provider route key, for diagnostics.
  * @param entry - the configured model entry.
  * @param route - the route-level switches, when any.
+ * @param preset - the gateway preset matched against the route's endpoint.
  * @param base - the installed catalog entry of the same id, when one exists.
  * @param api - the model's resolved wire protocol.
  * @returns a `compat` field to spread into the model, or nothing.
@@ -389,19 +456,23 @@ function resolveModelCompat(
   provider: string,
   entry: PiAiModelProfile,
   route: PiAiCompatProfile | undefined,
+  preset: PiAiCompatProfile | undefined,
   base: Model<Api> | undefined,
   api: string,
 ): { compat: OpenAICompletionsCompat } | Record<string, never> {
-  const thinkingFormat = entry.compat?.thinkingFormat ?? route?.thinkingFormat
-  const supportsReasoningEffort = entry.compat?.supportsReasoningEffort ?? route?.supportsReasoningEffort
-  if (thinkingFormat === undefined && supportsReasoningEffort === undefined) return {}
+  const entrySwitch = statedCompat(entry.compat)
+  const routeSwitch = statedCompat(route)
   if (api !== 'openai-completions') {
-    if (entry.compat?.thinkingFormat !== undefined || entry.compat?.supportsReasoningEffort !== undefined) {
-      invalid(provider, `model "${entry.id}" sets compat reasoning switches, but its api is "${api}";`
-        + ' thinkingFormat and supportsReasoningEffort exist only on openai-completions')
+    if (entrySwitch !== undefined) {
+      invalid(provider, `model "${entry.id}" sets compat switches, but its api is "${api}";`
+        + ' the exposed compat fields exist only on openai-completions')
     }
     return {}
   }
+  const declared = routeSwitch === undefined && entrySwitch === undefined
+    ? undefined
+    : { ...routeSwitch, ...entrySwitch }
+  if (declared === undefined && preset === undefined) return {}
   // The installed entry's compat matches the entry's OWN api — a route-level
   // `api` repoint (an anthropic catalog served through an OpenAI-compatible
   // gateway) leaves `base.compat` in the other protocol's shape, so it is
@@ -412,8 +483,8 @@ function resolveModelCompat(
   return {
     compat: {
       ...inherited,
-      ...thinkingFormat === undefined ? {} : { thinkingFormat },
-      ...supportsReasoningEffort === undefined ? {} : { supportsReasoningEffort },
+      ...preset === undefined ? {} : preset,
+      ...declared === undefined ? {} : declared,
     },
   }
 }
@@ -485,8 +556,7 @@ export function resolveRouteModels(request: RouteCatalogRequest): RouteCatalog {
       + ' must be listed in configuration')
   }
   const routeApi = sharedCatalogApi(defaults)
-  const routeCompatDefined = request.compat?.thinkingFormat !== undefined
-    || request.compat?.supportsReasoningEffort !== undefined
+  const routeCompatDefined = statedCompat(request.compat) !== undefined
   const seen = new Set<string>()
   const configuredMaxTokens = new Map<string, number>()
   const models = entries.map((entry) => {
@@ -535,12 +605,12 @@ export function resolveRouteModels(request: RouteCatalogRequest): RouteCatalog {
       contextWindow,
       maxTokens,
       ...resolveModelReasoning(provider, entry, base),
-      ...resolveModelCompat(provider, entry, request.compat, base, api),
+      ...resolveModelCompat(provider, entry, request.compat, request.presetCompat, base, api),
     }
   })
   if (routeCompatDefined && !models.some(model => model.api === 'openai-completions')) {
-    invalid(provider, 'sets compat reasoning switches, but no model on the route speaks openai-completions;'
-      + ' thinkingFormat and supportsReasoningEffort exist only on that protocol')
+    invalid(provider, 'sets compat switches, but no model on the route speaks openai-completions;'
+      + ' the exposed compat fields exist only on that protocol')
   }
   return { models, configuredMaxTokens }
 }

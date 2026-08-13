@@ -21,7 +21,7 @@ import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
 import type { ResolvedRetryPolicy, RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
-import { MODALITIES, resolveRouteModels, SUPPORTED_THINKING_FORMATS, THINKING_LEVELS } from './catalog.ts'
+import { catalogProvider, MODALITIES, resolveRouteModels, SUPPORTED_THINKING_FORMATS, THINKING_LEVELS } from './catalog.ts'
 import type {
   PiAiCompatProfile,
   PiAiModality,
@@ -29,6 +29,7 @@ import type {
   PiAiModelProfile,
   PiAiReasoningEfforts,
 } from './catalog.ts'
+import type { LlmGatewayCompatPresets } from './presets.ts'
 import { buildProvider, supportedProtocols } from './provider.ts'
 
 /** Default maximum idle interval while an adapter stream read is outstanding. */
@@ -185,9 +186,17 @@ const thinkingBudgets = z.object({
   high: z.number(),
 })
 
-const compatProfile: z<PiAiCompatProfile> = z.object({
+/** Schema of one compat block, shared by the profile and the gateway-preset seam. */
+export const compatSchema: z<PiAiCompatProfile> = z.object({
   thinkingFormat: z.union(SUPPORTED_THINKING_FORMATS),
   supportsReasoningEffort: z.boolean(),
+  supportsStore: z.boolean(),
+  supportsDeveloperRole: z.boolean(),
+  maxTokensField: z.union(['max_tokens', 'max_completion_tokens']),
+  requiresToolResultName: z.boolean(),
+  requiresAssistantAfterToolResult: z.boolean(),
+  requiresThinkingAsText: z.boolean(),
+  requiresReasoningContentOnAssistantMessages: z.boolean(),
 })
 
 /**
@@ -218,7 +227,7 @@ const modelFields = {
   // `{}`, and absent must stay distinguishable — it means "inherit the
   // installed catalog's capability", while `false` disables reasoning.
   reasoningEfforts: z.union([z.const(false), reasoningEfforts]),
-  compat: compatProfile,
+  compat: compatSchema,
 }
 
 const modelProfile: z<PiAiModelProfile> = z.object({
@@ -236,7 +245,7 @@ const profile = z.object({
   baseURL: z.string(),
   models: z.array(modelProfile),
   modelOverrides: z.dict(modelOverride),
-  compat: compatProfile,
+  compat: compatSchema,
   defaultContextWindow: z.number().step(1).min(1).default(DEFAULT_CONTEXT_WINDOW),
   defaultMaxTokens: z.number().step(1).min(1).default(DEFAULT_MAX_TOKENS),
   defaultInput: z.array(z.union(MODALITIES)).default([...DEFAULT_INPUT]),
@@ -296,10 +305,14 @@ function rejectRemovedFields(provider: string, source: PiAiProviderProfile): voi
  * resolves to the empty (dormant) route set here rather than through a hidden
  * fallback, and each route's models and pi-ai provider are materialized once.
  * @param providers - configured provider profiles keyed by route.
+ * @param presets - the optional gateway-compat preset registry; its match
+ *   against each route's endpoint supplies compat defaults under the
+ *   profile's own switches.
  * @returns validated profiles in configuration order.
  */
 export function resolveProfiles(
   providers: Readonly<Record<string, PiAiProviderProfile>> | undefined,
+  presets?: LlmGatewayCompatPresets,
 ): Map<string, ResolvedPiAiProviderProfile> {
   if (Array.isArray(providers)) {
     throw new Error('llm-pi-ai: providers is now a dict keyed by provider route, not an array of profiles')
@@ -336,6 +349,10 @@ export function resolveProfiles(
     // always shown route keys, and a catalog route must not silently rename
     // itself on every configuration surface just because it gained a profile.
     const displayName = source.displayName ?? provider
+    // The endpoint a gateway preset answers for: the profile's own baseURL
+    // when it sets one, else the installed catalog provider's. A repointed
+    // catalog route therefore takes the preset for where it actually points.
+    const presetCompat = presets?.match(source.baseURL ?? catalogProvider(provider)?.baseUrl ?? '')
     const catalog = resolveRouteModels({
       provider,
       ...source.api === undefined ? {} : { api: source.api },
@@ -343,6 +360,7 @@ export function resolveProfiles(
       ...source.models === undefined ? {} : { models: source.models },
       ...source.modelOverrides === undefined ? {} : { modelOverrides: source.modelOverrides },
       ...source.compat === undefined ? {} : { compat: source.compat },
+      ...presetCompat === undefined ? {} : { presetCompat },
       defaultInput,
       defaultContextWindow: source.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
       defaultMaxTokens: source.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,

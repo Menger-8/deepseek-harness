@@ -65,10 +65,12 @@ import { catalogProviderIds, catalogProviderTakesApiKey } from './catalog.ts'
 import { assertServiceable, Config, resolveProfiles } from './config.ts'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { discoverModels } from './discovery.ts'
+import { LLM_GATEWAY_COMPAT_PRESETS } from './presets.ts'
+import type { LlmGatewayCompatPresets } from './presets.ts'
 
 export { PiAiAdapter } from './adapter.ts'
 export type { PiAiAdapterOptions } from './adapter.ts'
-export { Config } from './config.ts'
+export { Config, compatSchema } from './config.ts'
 export type {
   PiAiCompatProfile,
   PiAiModality,
@@ -79,6 +81,8 @@ export type {
   PiAiThinkingFormat,
   ResolvedPiAiProviderProfile,
 } from './config.ts'
+export { LLM_GATEWAY_COMPAT_PRESETS } from './presets.ts'
+export type { LlmGatewayCompatPresets } from './presets.ts'
 export { supportedProtocols } from './provider.ts'
 
 export const name = 'llm-pi-ai'
@@ -150,11 +154,16 @@ function directoryEntries(
 export function apply(ctx: Context, config: Config): void {
   let current: () => Config = () => config
   let lastRaw: Config | undefined
+  let lastPresets: LlmGatewayCompatPresets | undefined
+  let lastPresetsRevision = 0
   let memoized: ReadonlyMap<string, ResolvedPiAiProviderProfile> | undefined
   /**
    * The resolved profiles for the current configuration, memoized by the raw
    * snapshot's identity — which is also what makes the adapter's own snapshot
-   * stable across operations that observe no change.
+   * stable across operations that observe no change — and by the preset
+   * registry's identity and revision, so a provider plugin mounted after this
+   * one, or a preset registered into a live registry, reaches the next
+   * resolution without recomputing every request between changes.
    *
    * No fallback for an unserviceable snapshot lives here: the section schema
    * resolves the whole profile set, so a write that could not be served is
@@ -164,9 +173,15 @@ export function apply(ctx: Context, config: Config): void {
    */
   const profiles = (): ReadonlyMap<string, ResolvedPiAiProviderProfile> => {
     const raw = current()
-    if (raw === lastRaw && memoized !== undefined) return memoized
-    const next = resolveProfiles(raw.providers)
+    const active = ctx.get(LLM_GATEWAY_COMPAT_PRESETS) as LlmGatewayCompatPresets | undefined
+    const revision = active?.revision ?? 0
+    if (raw === lastRaw && active === lastPresets && revision === lastPresetsRevision && memoized !== undefined) {
+      return memoized
+    }
+    const next = resolveProfiles(raw.providers, active)
     lastRaw = raw
+    lastPresets = active
+    lastPresetsRevision = revision
     memoized = next
     return next
   }

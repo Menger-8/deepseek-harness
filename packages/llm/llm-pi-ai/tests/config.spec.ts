@@ -35,6 +35,26 @@ describe('reasoning schema boundary', () => {
   it('rejects a thinking format outside the offered set', () => {
     expect(configWith({ compat: { thinkingFormat: 'quantum' } })).toThrow(/expected/)
   })
+
+  it('accepts the full exposed compat surface on a route and per model', () => {
+    const full = {
+      thinkingFormat: 'deepseek',
+      supportsReasoningEffort: true,
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      maxTokensField: 'max_tokens',
+      requiresToolResultName: true,
+      requiresAssistantAfterToolResult: true,
+      requiresThinkingAsText: false,
+      requiresReasoningContentOnAssistantMessages: true,
+    }
+    expect(() => Config(routeWith({ compat: full })() as never)).not.toThrow()
+    expect(() => Config(configWith({ compat: full })() as never)).not.toThrow()
+  })
+
+  it('rejects a maxTokensField outside the two field spellings', () => {
+    expect(configWith({ compat: { maxTokensField: 'max_new_tokens' } })).toThrow(/expected/)
+  })
 })
 
 describe('modality schema boundary', () => {

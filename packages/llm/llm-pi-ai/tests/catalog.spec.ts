@@ -828,6 +828,146 @@ describe('reasoning-dispatch compat switches', () => {
   })
 })
 
+describe('gateway compat presets', () => {
+  /** The materialized models of one route with the caller's preset set active. */
+  function modelsOf(
+    providers: Record<string, LlmPiAi.PiAiProviderProfile>,
+    presets: Readonly<Record<string, LlmPiAi.PiAiCompatProfile>>,
+    route: string,
+  ): Map<string, Model<Api>> {
+    const registry: LlmPiAi.LlmGatewayCompatPresets = {
+      revision: 0,
+      register: () => {
+        throw new Error('unused in these tests')
+      },
+      match: (baseURL: string) => {
+        try {
+          const hostname = new URL(baseURL).hostname
+          for (const [pattern, compat] of Object.entries(presets)) {
+            if (pattern.startsWith('*.')) {
+              if (hostname.endsWith(pattern.slice(1))) return compat
+            } else if (hostname === pattern) {
+              return compat
+            }
+          }
+          return undefined
+        } catch {
+          return undefined
+        }
+      },
+    }
+    const models = resolveProfiles(providers, registry).get(route)?.piProvider.getModels() ?? []
+    return new Map(models.map(model => [model.id, model]))
+  }
+
+  it('lands a matched preset under explicit switches and over the catalog entry', () => {
+    const [catalogModel] = getBuiltinModels('deepseek')
+    if (catalogModel === undefined) throw new Error('the installed catalog ships no deepseek model')
+
+    const models = modelsOf({
+      deepseek: { models: [{ id: catalogModel.id }] },
+    }, {
+      'api.deepseek.com': { thinkingFormat: 'openai', supportsDeveloperRole: true },
+    }, 'deepseek')
+
+    // The preset pins two fields; the catalog's other quirks survive because
+    // the preset merges over the inherited entry, never replaces it.
+    expect(models.get(catalogModel.id)?.compat).toEqual({
+      ...catalogModel.compat,
+      thinkingFormat: 'openai',
+      supportsDeveloperRole: true,
+    })
+  })
+
+  it('keeps entry and route switches winning per field over a matched preset', () => {
+    const models = modelsOf({
+      'acme-gateway': {
+        api: 'openai-completions',
+        baseURL: 'https://acme.test/v1',
+        compat: { thinkingFormat: 'openai' },
+        models: [
+          { id: 'm', compat: { supportsReasoningEffort: false } },
+        ],
+      },
+    }, {
+      'acme.test': { thinkingFormat: 'deepseek', supportsReasoningEffort: true, supportsDeveloperRole: false },
+    }, 'acme-gateway')
+
+    expect(models.get('m')?.compat).toEqual({
+      thinkingFormat: 'openai',
+      supportsReasoningEffort: false,
+      supportsDeveloperRole: false,
+    })
+  })
+
+  it('matches against the profile baseURL, so a repointed catalog route takes the gateway preset', () => {
+    const [catalogModel] = getBuiltinModels('deepseek')
+    if (catalogModel === undefined) throw new Error('the installed catalog ships no deepseek model')
+
+    const models = modelsOf({
+      deepseek: { baseURL: 'https://ark.cn-beijing.volces.com/api/coding/v3', models: [{ id: catalogModel.id }] },
+    }, {
+      '*.volces.com': { maxTokensField: 'max_tokens' },
+    }, 'deepseek')
+
+    expect((models.get(catalogModel.id)?.compat as OpenAICompletionsCompat).maxTokensField).toBe('max_tokens')
+  })
+
+  it('skips a matched preset for models of other protocols', () => {
+    const catalog = getBuiltinModels('xai') as readonly Model<Api>[]
+    const completions = catalog.find(model => model.api === 'openai-completions')
+    const responses = catalog.find(model => model.api === 'openai-responses')
+    if (completions === undefined || responses === undefined) throw new Error('xai no longer ships a mixed catalog')
+
+    const models = modelsOf({
+      xai: { baseURL: 'https://gateway.acme.test/v1', models: [{ id: completions.id }, { id: responses.id }] },
+    }, {
+      'gateway.acme.test': { supportsDeveloperRole: false },
+    }, 'xai')
+
+    expect((models.get(completions.id)?.compat as OpenAICompletionsCompat).supportsDeveloperRole).toBe(false)
+    expect(models.get(responses.id)?.compat).toEqual(responses.compat)
+  })
+
+  it('leaves a route without a matching preset untouched', () => {
+    const models = modelsOf({
+      'acme-gateway': {
+        api: 'openai-completions',
+        baseURL: 'https://acme.test/v1',
+        models: [{ id: 'm' }],
+      },
+    }, {
+      'other.test': { supportsDeveloperRole: false },
+    }, 'acme-gateway')
+
+    // The bare declaration carries no compat block at all: no preset fact
+    // reached the model, so detection still decides every field at request time.
+    expect(models.get('m')?.compat).toBeUndefined()
+  })
+
+  it('does not fail a route with no completions models when a preset matches it', () => {
+    expect(() => modelsOf({
+      anthropic: { baseURL: 'https://gateway.acme.test/v1' },
+    }, {
+      'gateway.acme.test': { supportsDeveloperRole: false },
+    }, 'anthropic')).not.toThrow()
+  })
+
+  it('consults the registry even when neither the profile nor the catalog names an endpoint', () => {
+    // The match still runs with an empty endpoint before the resolver refuses
+    // the endpoint-less route — the preset lookup must never be the thing that
+    // throws for a route whose own configuration is the problem.
+    expect(() => modelsOf({
+      'acme-gateway': {
+        api: 'openai-completions',
+        models: [{ id: 'm' }],
+      },
+    }, {
+      'gateway.acme.test': { supportsDeveloperRole: false },
+    }, 'acme-gateway')).toThrow(/needs a baseURL/)
+  })
+})
+
 describe('resolution snapshots', () => {
   it('finishes an in-flight request under the configuration it started with', async () => {
     const server = await mockServer([{ events: textEvents }])

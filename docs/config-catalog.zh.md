@@ -893,6 +893,22 @@ export interface DeepSeekCatalogModel {
 
 来源：[`packages/llm/llm-deepseek/src/index.ts:62`](../packages/llm/llm-deepseek/src/index.ts)
 
+<a id="deepseek-aidsh-llm-gateway-presets"></a>
+
+## `@deepseek-ai/dsh-llm-gateway-presets`
+
+```ts config-catalog
+/** The presets plugin's config: extra presets merged over the shipped set, same hostname replacing it. */
+export interface Config {
+  /** Presets by hostname pattern; see {@link HostnameCompatPresetRegistry.register}. */
+  presets?: Record<string, PiAiCompatProfile>
+}
+```
+
+依赖：[`PiAiCompatProfile`](../packages/llm/llm-pi-ai/src/index.ts)
+
+来源：[`packages/llm/llm-gateway-presets/src/index.ts:43`](../packages/llm/llm-gateway-presets/src/index.ts)
+
 <a id="deepseek-aidsh-llm-pi-ai"></a>
 
 ## `@deepseek-ai/dsh-llm-pi-ai`
@@ -1038,19 +1054,37 @@ export interface PiAiModelProfile {
 export type PiAiModelOverride = Omit<PiAiModelProfile, 'id'>
 
 /**
- * Reasoning-dispatch compatibility switches, set on the route (its models'
- * default) or per model (winning over the route). Only the switches pi-ai's
- * reasoning dispatch reads are offered; the rest of pi-ai's compat surface
- * keeps its baseURL-derived auto-detection. pi-ai types both fields only on
- * `OpenAICompletionsCompat` — the other wire protocols define their reasoning
- * fields in the protocol itself — so resolution rejects a model-level switch
- * anywhere else, while a route-level default skips past models it cannot fit.
+ * The `openai-completions` compatibility switches a profile (route, model) or
+ * a gateway preset may pin, set on the route (its models' default) or per
+ * model (winning over the route). The offered set covers the endpoint-dialect
+ * facts a gateway switch changes for chat — reasoning dispatch, the system
+ * role, the output-cap field, and the reasoning/tool-result replay rules.
+ * The rest of pi-ai's compat surface (grammar tools, strict mode, cache
+ * control formats, session affinity, and the routing dialects) keeps its
+ * baseURL-derived auto-detection. pi-ai types these fields only on
+ * `OpenAICompletionsCompat` — the other wire protocols define their own
+ * fields — so resolution rejects a model-level switch anywhere else, while a
+ * route-level default or a preset skips past models it cannot fit.
  */
 export interface PiAiCompatProfile {
   /** Reasoning parameter format the endpoint expects; absent keeps the catalog entry's, then pi-ai's baseURL-derived guess. */
   thinkingFormat?: PiAiThinkingFormat
   /** Whether the endpoint accepts `reasoning_effort`; absent keeps the catalog entry's, then pi-ai's baseURL-derived guess. */
   supportsReasoningEffort?: boolean
+  /** Whether the endpoint accepts `store`; absent keeps the catalog entry's, then pi-ai's baseURL-derived guess. */
+  supportsStore?: boolean
+  /** Whether the endpoint accepts the `developer` system role instead of `system`; absent keeps the guess. */
+  supportsDeveloperRole?: boolean
+  /** Which field caps output tokens; absent keeps the catalog entry's, then pi-ai's baseURL-derived guess. */
+  maxTokensField?: NonNullable<OpenAICompletionsCompat['maxTokensField']>
+  /** Whether tool results require a `name`; absent keeps the guess. */
+  requiresToolResultName?: boolean
+  /** Whether a user message after tool results needs an assistant message in between; absent keeps the guess. */
+  requiresAssistantAfterToolResult?: boolean
+  /** Whether thinking blocks must be sent as `<thinking>`-delimited text instead of a reasoning channel; absent keeps the guess. */
+  requiresThinkingAsText?: boolean
+  /** Whether replayed assistant messages must echo an empty `reasoning_content` while reasoning is enabled; absent keeps the guess. */
+  requiresReasoningContentOnAssistantMessages?: boolean
 }
 
 /** One request modality a pi-ai model may accept. */
