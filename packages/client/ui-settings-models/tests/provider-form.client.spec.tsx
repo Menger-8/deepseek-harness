@@ -812,6 +812,243 @@ describe('endpoint interrogation', () => {
     await waitFor(() => { expect(mutate).toHaveBeenCalled() })
     expect(firstMutate(mutate).ops[0]?.value).toEqual([{ id: 'plain' }])
   })
+
+  it('probes the hand-typed rows and writes the confirmed levels back into them', async () => {
+    const discover = vi.fn(() => Promise.resolve(ok({
+      models: [{ id: 'typed', reasoning: { efforts: { off: null, high: 'high' }, maxTokensField: 'max_tokens' } }],
+    })))
+    const { mutate } = await mountSection({
+      discover,
+      providers: { openai: { baseURL: 'https://proxy.example/v1', models: [{ id: 'typed' }] } },
+    })
+    openEditor('openai')
+
+    fireEvent.click(screen.getByText(en.probeModels))
+
+    await waitFor(() => { expect(discover).toHaveBeenCalled() })
+    // The rows' ids travel as-is: the listing is never asked for, so a
+    // hand-typed id the endpoint does not advertise is still answered.
+    expect(firstProbe(discover)).toEqual({
+      settingsNs: 'llm-pi-ai',
+      provider: 'openai',
+      baseURL: 'https://proxy.example/v1',
+      probeCapabilities: true,
+      models: ['typed'],
+    })
+    expect(screen.getByText(en.probeNoteProbed.replace('{summary}', 'typed (Off/High)'))).toBeTruthy()
+
+    fireEvent.click(screen.getByText(en.apply))
+    await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+    expect(firstMutate(mutate).ops[0]?.value).toEqual([
+      { id: 'typed', reasoningEfforts: { off: null, high: 'high' } },
+    ])
+  })
+
+  it('clears a row\u2019s stale hand-written levels when the probe confirms none', async () => {
+    const discover = vi.fn(() => Promise.resolve(ok({
+      models: [{ id: 'typed', reasoning: { maxTokensField: 'max_completion_tokens' } }],
+    })))
+    const { mutate } = await mountSection({
+      discover,
+      providers: {
+        openai: {
+          baseURL: 'https://proxy.example/v1',
+          models: [{ id: 'typed', reasoningEfforts: { off: null, high: 'high' } }],
+        },
+      },
+    })
+    openEditor('openai')
+
+    fireEvent.click(screen.getByText(en.probeModels))
+
+    await waitFor(() => { expect(screen.getByText(en.probeRowsNone)).toBeTruthy() })
+    fireEvent.click(screen.getByText(en.apply))
+    await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+    // Fresh empirical facts win: a completed probe that confirmed no levels
+    // removes the stale set rather than keeping it.
+    expect(firstMutate(mutate).ops[0]?.value).toEqual([{ id: 'typed' }])
+  })
+
+  it('keeps a row whose probe failed, naming the failure', async () => {
+    const discover = vi.fn(() => Promise.resolve(ok({
+      models: [{ id: 'typed', reasoning: { failed: 'HTTP 401' } }],
+    })))
+    const { mutate } = await mountSection({
+      discover,
+      providers: {
+        openai: {
+          baseURL: 'https://proxy.example/v1',
+          models: [{ id: 'typed', reasoningEfforts: { off: null, high: 'high' } }],
+        },
+      },
+    })
+    openEditor('openai')
+
+    fireEvent.click(screen.getByText(en.probeModels))
+
+    await waitFor(() => {
+      expect(screen.getByText(en.probeRowsFailedModels.replace('{summary}', 'typed (HTTP 401)'))).toBeTruthy()
+    })
+    // A failed probe establishes nothing, so the row keeps its hand-written
+    // set; a later hand edit still carries it through.
+    fireEvent.change(screen.getByLabelText(`${en.modelName} 1`), { target: { value: 'Kept' } })
+    fireEvent.click(screen.getByText(en.apply))
+    await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+    expect(firstMutate(mutate).ops[0]?.value).toEqual([
+      { id: 'typed', name: 'Kept', reasoningEfforts: { off: null, high: 'high' } },
+    ])
+  })
+
+  it('probes the rows without a key when none is typed, and folds route facts into compat', async () => {
+    const discover = vi.fn(() => Promise.resolve(ok({
+      models: [{
+        id: 'gateway',
+        reasoning: { efforts: { off: null, high: 'high' }, developerRole: 'rejected' },
+      }],
+    })))
+    const { mutate } = await mountSection({
+      discover,
+      providers: { openai: { baseURL: 'https://proxy.example/v1', models: [{ id: 'gateway' }] } },
+    })
+    openEditor('openai')
+
+    fireEvent.click(screen.getByText(en.probeModels))
+
+    await waitFor(() => { expect(discover).toHaveBeenCalled() })
+    expect(firstProbe(discover)).toEqual({
+      settingsNs: 'llm-pi-ai',
+      provider: 'openai',
+      baseURL: 'https://proxy.example/v1',
+      probeCapabilities: true,
+      models: ['gateway'],
+    })
+    const combinedNote = `${en.probeNoteProbed.replace('{summary}', 'gateway (Off/High)')} ${en.probeDeveloperFixed}`
+    expect(screen.getByText(combinedNote)).toBeTruthy()
+
+    fireEvent.click(screen.getByText(en.apply))
+    await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+    const ops = firstMutate(mutate).ops
+    expect(ops.find(op => op.path.join('.') === 'providers.openai.models')?.value).toEqual([
+      { id: 'gateway', reasoningEfforts: { off: null, high: 'high' } },
+    ])
+    expect(ops.find(op => op.path.join('.') === 'providers.openai.compat')?.value)
+      .toEqual({ supportsDeveloperRole: false })
+  })
+
+  it('names a refusal of the row probe without touching the rows', async () => {
+    const discover = vi.fn(() => Promise.resolve(
+      fail('the endpoint refuses this model', 'model-discovery-failed'),
+    ))
+    const { mutate } = await mountSection({
+      discover,
+      providers: { openai: { baseURL: 'https://proxy.example/v1', models: [{ id: 'typed' }] } },
+    })
+    openEditor('openai')
+
+    fireEvent.click(screen.getByText(en.probeModels))
+
+    await waitFor(() => {
+      expect(screen.getByText(en.probeRowsFailed.replace('{message}', 'the endpoint refuses this model'))).toBeTruthy()
+    })
+    // The refusal is a detour, not a dead end: the rows stay editable and a
+    // later hand edit still applies cleanly.
+    fireEvent.change(screen.getByLabelText(`${en.modelName} 1`), { target: { value: 'Kept' } })
+    fireEvent.click(screen.getByText(en.apply))
+    await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+    expect(firstMutate(mutate).ops[0]?.value).toEqual([{ id: 'typed', name: 'Kept' }])
+  })
+
+  it('names a transport rejection of the row probe', async () => {
+    const discover = vi.fn(() => Promise.reject(new Error('carrier down')))
+    await mountSection({
+      discover,
+      providers: { openai: { baseURL: 'https://proxy.example/v1', models: [{ id: 'typed' }] } },
+    })
+    openEditor('openai')
+
+    fireEvent.click(screen.getByText(en.probeModels))
+
+    await waitFor(() => {
+      expect(screen.getByText(en.probeRowsFailed.replace('{message}', 'carrier down'))).toBeTruthy()
+    })
+  })
+
+  it('leaves rows alone when the probe answered nothing for them', async () => {
+    // A protocol without the chat shape (or a registry answer) returns the
+    // rows without `reasoning`: no fact was established, so nothing is adopted.
+    const discover = vi.fn(() => Promise.resolve(ok({ models: [{ id: 'typed' }] })))
+    await mountSection({
+      discover,
+      providers: { openai: { baseURL: 'https://proxy.example/v1', models: [{ id: 'typed' }] } },
+    })
+    openEditor('openai')
+
+    fireEvent.click(screen.getByText(en.probeModels))
+
+    await waitFor(() => { expect(screen.getByText(en.probeRowsNone)).toBeTruthy() })
+  })
+
+  it('patches only the rows the probe answered for, leaving the rest alone', async () => {
+    const discover = vi.fn(() => Promise.resolve(ok({
+      models: [
+        { id: 'b', reasoning: { efforts: { off: null, high: 'high' } } },
+        { id: 'ghost', reasoning: { efforts: { off: null, high: 'high' } } },
+      ],
+    })))
+    const { mutate } = await mountSection({
+      discover,
+      providers: {
+        openai: {
+          baseURL: 'https://proxy.example/v1',
+          models: [{ id: 'a' }, { id: 'b' }],
+        },
+      },
+    })
+    openEditor('openai')
+
+    fireEvent.click(screen.getByText(en.probeModels))
+
+    await waitFor(() => {
+      expect(screen.getByText(en.probeNoteProbed.replace('{summary}', 'b (Off/High), ghost (Off/High)'))).toBeTruthy()
+    })
+    fireEvent.click(screen.getByText(en.apply))
+    await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+    // `b` gains the levels; `a` keeps its row untouched; `ghost` is not a row,
+    // so nothing is invented for it.
+    expect(firstMutate(mutate).ops[0]?.value).toEqual([
+      { id: 'a' },
+      { id: 'b', reasoningEfforts: { off: null, high: 'high' } },
+    ])
+  })
+
+  it('waits for a row with an ID before probing, and hides the probe without an endpoint', async () => {
+    const discover = vi.fn(() => Promise.resolve(ok({ models: [] })))
+    await mountSection({
+      discover,
+      providers: { openai: { baseURL: 'https://proxy.example/v1', models: [] } },
+    })
+    openEditor('openai')
+
+    // No row has an ID yet, so there is nothing to probe.
+    expect(buttonNamed(en.probeModels).disabled).toBe(true)
+    expect(buttonNamed(en.probeModels).title).toBe(en.probeModelsNeedsRows)
+
+    fireEvent.click(screen.getByText(en.addModel))
+    expect(buttonNamed(en.probeModels).disabled).toBe(true)
+    fireEvent.change(screen.getByLabelText(`${en.modelId} 1`), { target: { value: 'typed' } })
+    expect(buttonNamed(en.probeModels).disabled).toBe(false)
+    fireEvent.click(screen.getByText(en.probeModels))
+    await waitFor(() => { expect(discover).toHaveBeenCalled() })
+    expect(firstProbe(discover)).toMatchObject({ probeCapabilities: true, models: ['typed'] })
+    cleanup()
+
+    // Without an endpoint there is nothing to probe against: the row probe is
+    // not offered, while the registry-based fetch still is.
+    await mountSection({ providers: { openai: {} } })
+    openEditor('openai')
+    expect(screen.queryByText(en.probeModels)).toBeNull()
+    expect(screen.getByText(en.fetchModels)).toBeTruthy()
+  })
 })
 
 describe('provider rows', () => {

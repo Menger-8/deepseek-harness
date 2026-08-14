@@ -244,6 +244,18 @@ export async function discoverModels(
   // relies on the provider's own ambient discovery is meant to be asked.
   const supplied = request.apiKey ?? await storedApiKey?.()
   const apiKey = supplied === undefined ? undefined : usableProbeKey(supplied)
+  // A picked-id capability probe asks about the ids themselves: the listing is
+  // not fetched at all, so a hand-typed id the endpoint does not advertise is
+  // still answered — which is exactly what probing hand-entered rows needs.
+  const wanted = request.models
+  if (request.probeCapabilities === true && api === 'openai-completions' && wanted !== undefined) {
+    const ids = wanted.filter(id => id.length > 0)
+    if (ids.length === 0) return []
+    const spec: Omit<ModelProbeSpec, 'model'> = { baseURL: request.baseURL }
+    if (apiKey !== undefined) spec.apiKey = apiKey
+    if (request.signal !== undefined) spec.signal = request.signal
+    return probePicked(ids.map(id => ({ id })), spec)
+  }
   let response: Response
   try {
     response = await fetch(url, {
@@ -286,18 +298,17 @@ export async function discoverModels(
     throw new LlmError(`${url} did not answer with JSON`, 'DISCOVERY_FAILED', { cause: error })
   }
   const listed = readListing(body)
+  // Reaching here means no picked-id probe was asked for: `probeCapabilities`
+  // with `models` was already answered above, without fetching the listing.
   if (request.probeCapabilities !== true || api !== 'openai-completions') {
     // Probing is the one per-model chat shape this adapter can read; a protocol
     // without it keeps the listing answer, facts absent.
     return listed
   }
-  const wanted = request.models
-  const picked = wanted === undefined ? listed : listed.filter(model => wanted.includes(model.id))
-  if (picked.length === 0) return picked
   const spec: Omit<ModelProbeSpec, 'model'> = { baseURL: request.baseURL }
   if (apiKey !== undefined) spec.apiKey = apiKey
   if (request.signal !== undefined) spec.signal = request.signal
-  return probePicked(picked, spec)
+  return probePicked(listed, spec)
 }
 
 /**
@@ -315,9 +326,6 @@ async function probePicked(
   let next = 0
   const workers = Array.from({ length: Math.min(2, models.length) }, async () => {
     while (next < models.length) {
-      if (spec.signal?.aborted) {
-        throw new LlmError('model discovery aborted by caller', 'ABORTED')
-      }
       const index = next++
       const model = models[index]
       /* v8 ignore next 3 -- the while bound keeps the index inside the array; the guard answers noUncheckedIndexedAccess. */
@@ -328,6 +336,13 @@ async function probePicked(
         ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
         ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
         reasoning: await probeModelCapabilities({ ...spec, model: model.id }),
+      }
+      // An abort that landed during (or just before) this model's probe must
+      // still fail the whole pass: the caller cancelled, so no partial probe
+      // report is delivered. The probe reports the abort as that model's
+      // failure; this is what promotes it to the pass's rejection.
+      if (spec.signal?.aborted) {
+        throw new LlmError('model discovery aborted by caller', 'ABORTED')
       }
     }
   })

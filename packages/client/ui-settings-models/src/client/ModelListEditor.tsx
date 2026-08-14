@@ -172,6 +172,36 @@ function adopt(candidate: DiscoveredModelView): ModelDraft {
   }
 }
 
+/** Fold one probed model's route-level facts into the card's `compat` merge. */
+function foldRouteFacts(facts: ProbeRouteFacts, model: DiscoveredModelView): void {
+  if (model.reasoning?.developerRole === 'rejected' && facts.supportsDeveloperRole === undefined) {
+    facts.supportsDeveloperRole = false
+  }
+  if (model.reasoning?.thinkingFormat !== undefined && facts.thinkingFormat === undefined) {
+    facts.thinkingFormat = model.reasoning.thinkingFormat
+  }
+  if (model.reasoning?.maxTokensField !== undefined && facts.maxTokensField === undefined) {
+    facts.maxTokensField = model.reasoning.maxTokensField
+  }
+}
+
+/** The confirmed levels of one probed model as `Off/High/Max`, or `undefined`. */
+function levelsSummary(model: DiscoveredModelView): string | undefined {
+  const efforts = model.reasoning?.efforts
+  if (efforts === undefined || Object.keys(efforts).length === 0) return undefined
+  return Object.keys(efforts)
+    .map(level => level.charAt(0).toUpperCase() + level.slice(1))
+    .join('/')
+}
+
+/** One row with its `reasoningEfforts` adopted, or the field dropped when none were confirmed. */
+function withEfforts(model: ModelDraft, efforts: Record<string, string | null> | undefined): ModelDraft {
+  const next = { ...model, reasoningEfforts: efforts }
+  return efforts === undefined
+    ? Object.fromEntries(Object.entries(next).filter(([key]) => key !== 'reasoningEfforts'))
+    : next
+}
+
 /**
  * Render the model list with its fetch action.
  * @param props - the drafted rows, probe target, wire face, and copy.
@@ -180,6 +210,7 @@ function adopt(candidate: DiscoveredModelView): ModelDraft {
 export function ModelListEditor(props: ModelListEditorProps): ReactNode {
   const { models, onChange, probe, api, t, disabled } = props
   const [busy, setBusy] = useState(false)
+  const [probeBusy, setProbeBusy] = useState(false)
   const [failure, setFailure] = useState<string | undefined>(undefined)
   const [candidates, setCandidates] = useState<readonly DiscoveredModelView[] | undefined>(undefined)
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set())
@@ -231,7 +262,7 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
     })
   }
 
-  const patch = (index: number, next: Record<string, string | number | undefined>): void => {
+  const patch = (index: number, next: Record<string, unknown>): void => {
     onChange(models.map((model, at) => {
       if (at !== index) return model
       // Rebuilt rather than spread over: an emptied optional field has to leave
@@ -248,19 +279,25 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
     }))
   }
 
+  /** The hand-typed rows' non-empty ids, in row order, each once. */
+  const rowIds = [...new Set(models.map(model => textOf(model, 'id')).filter(id => id.length > 0))]
+
+  /** The discoverModels payload for the form as it currently stands. */
+  const probePayload = () => ({
+    settingsNs: probe.settingsNs,
+    ...probe.provider === undefined ? {} : { provider: probe.provider },
+    ...probe.baseURL === undefined || probe.baseURL.length === 0 ? {} : { baseURL: probe.baseURL },
+    ...probe.api === undefined ? {} : { api: probe.api },
+    ...probe.apiKey === undefined ? {} : { apiKey: probe.apiKey },
+  })
+
   const fetchModels = async (): Promise<void> => {
     setBusy(true)
     setFailure(undefined)
     // A fresh interrogation replaces the previous probe's note.
     setProbeNote(undefined)
     try {
-      const response = await api.llm.discoverModels({
-        settingsNs: probe.settingsNs,
-        ...probe.provider === undefined ? {} : { provider: probe.provider },
-        ...probe.baseURL === undefined || probe.baseURL.length === 0 ? {} : { baseURL: probe.baseURL },
-        ...probe.api === undefined ? {} : { api: probe.api },
-        ...probe.apiKey === undefined ? {} : { apiKey: probe.apiKey },
-      })
+      const response = await api.llm.discoverModels(probePayload())
       if (!response.result.ok) {
         setFailure(response.result.error.message)
         return
@@ -289,6 +326,71 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
     setPicked(new Set())
   }
 
+  /**
+   * Probe the hand-typed rows for their reasoning capability and adopt the
+   * facts into the rows themselves: each probed row gains (or loses) its
+   * `reasoningEfforts`, and route-level facts merge into the card's `compat`
+   * block exactly as the picker's probe does. The ids travel as-is, so a row
+   * the endpoint's listing would not advertise is still answered.
+   */
+  const probeRows = async (): Promise<void> => {
+    setProbeBusy(true)
+    setFailure(undefined)
+    // A fresh probe replaces the previous probe's note.
+    setProbeNote(undefined)
+    try {
+      const response = await api.llm.discoverModels({
+        ...probePayload(),
+        probeCapabilities: true,
+        models: rowIds,
+      })
+      if (!response.result.ok) {
+        setProbeNote(t('probeRowsFailed').replace('{message}', response.result.error.message))
+        return
+      }
+      const facts: ProbeRouteFacts = {}
+      const summaries: string[] = []
+      const failures: string[] = []
+      const found = new Map(response.result.value.models.map(model => [model.id, model]))
+      // Rows are patched in one pass against a single array, so adopting the
+      // facts of several models cannot have later patches build on stale rows.
+      let rows: ModelDraft[] = [...models]
+      let adopted = false
+      for (const model of found.values()) {
+        const reasoning = model.reasoning
+        // Not probed at all (a protocol without the chat shape, a catalog
+        // answer): no fact was established, so the row keeps whatever it has.
+        if (reasoning === undefined) continue
+        if (reasoning.failed !== undefined) {
+          failures.push(`${model.id} (${reasoning.failed})`)
+          continue
+        }
+        const levels = levelsSummary(model)
+        if (levels !== undefined) summaries.push(`${model.id} (${levels})`)
+        foldRouteFacts(facts, model)
+        // Fresh empirical facts win over what the row held: the confirmed
+        // levels are written in, and a completed probe that confirmed none
+        // clears a stale hand-written set.
+        const index = rows.findIndex(row => textOf(row, 'id') === model.id)
+        if (index === -1) continue
+        rows = rows.map((row, at) => at === index ? withEfforts(row, reasoning.efforts) : row)
+        adopted = true
+      }
+      if (adopted) onChange(rows)
+      if (Object.keys(facts).length > 0) props.onProbeFacts?.(facts)
+      const notes: string[] = []
+      if (summaries.length > 0) notes.push(t('probeNoteProbed').replace('{summary}', summaries.join(', ')))
+      if (failures.length > 0) notes.push(t('probeRowsFailedModels').replace('{summary}', failures.join(', ')))
+      if (notes.length === 0) notes.push(t('probeRowsNone'))
+      if (facts.supportsDeveloperRole === false) notes.push(t('probeDeveloperFixed'))
+      setProbeNote(notes.join(' '))
+    } catch (error) {
+      setProbeNote(t('probeRowsFailed').replace('{message}', messageOf(error)))
+    } finally {
+      setProbeBusy(false)
+    }
+  }
+
   const adoptPicked = async (): Promise<void> => {
     /* v8 ignore next -- the dialog only renders with candidates loaded */
     if (candidates === undefined) return
@@ -302,11 +404,7 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
       setProbeNote(undefined)
       try {
         const response = await api.llm.discoverModels({
-          settingsNs: probe.settingsNs,
-          ...probe.provider === undefined ? {} : { provider: probe.provider },
-          ...probe.baseURL === undefined || probe.baseURL.length === 0 ? {} : { baseURL: probe.baseURL },
-          ...probe.api === undefined ? {} : { api: probe.api },
-          ...probe.apiKey === undefined ? {} : { apiKey: probe.apiKey },
+          ...probePayload(),
           probeCapabilities: true,
           models: pickedIds,
         })
@@ -317,22 +415,9 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
           const summaries: string[] = []
           const found = new Map(response.result.value.models.map(model => [model.id, model]))
           for (const model of found.values()) {
-            const efforts = model.reasoning?.efforts
-            if (efforts !== undefined && Object.keys(efforts).length > 0) {
-              const levels = Object.keys(efforts)
-                .map(level => level.charAt(0).toUpperCase() + level.slice(1))
-                .join('/')
-              summaries.push(`${model.id} (${levels})`)
-            }
-            if (model.reasoning?.developerRole === 'rejected' && facts.supportsDeveloperRole === undefined) {
-              facts.supportsDeveloperRole = false
-            }
-            if (model.reasoning?.thinkingFormat !== undefined && facts.thinkingFormat === undefined) {
-              facts.thinkingFormat = model.reasoning.thinkingFormat
-            }
-            if (model.reasoning?.maxTokensField !== undefined && facts.maxTokensField === undefined) {
-              facts.maxTokensField = model.reasoning.maxTokensField
-            }
+            const levels = levelsSummary(model)
+            if (levels !== undefined) summaries.push(`${model.id} (${levels})`)
+            foldRouteFacts(facts, model)
           }
           if (Object.keys(facts).length > 0) props.onProbeFacts?.(facts)
           setProbeNote(summaries.length > 0
@@ -403,7 +488,7 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
         <button
           type="button"
           className={styles['linkButton']}
-          disabled={disabled || busy || !askable || props.probeBlocked !== undefined}
+          disabled={disabled || busy || probeBusy || !askable || props.probeBlocked !== undefined}
           title={props.probeBlocked !== undefined
             ? t(props.probeBlocked)
             : askable ? undefined : t('fetchNeedsBaseUrl')}
@@ -411,6 +496,21 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
         >
           {busy ? t('fetching') : t('fetchModels')}
         </button>
+        {probe.baseURL !== undefined && probe.baseURL.length > 0
+          ? (
+            <button
+              type="button"
+              className={styles['linkButton']}
+              disabled={disabled || busy || probeBusy || props.probeBlocked !== undefined || rowIds.length === 0}
+              title={props.probeBlocked !== undefined
+                ? t(props.probeBlocked)
+                : rowIds.length === 0 ? t('probeModelsNeedsRows') : undefined}
+              onClick={() => { void probeRows() }}
+            >
+              {probeBusy ? t('probeModelsBusy') : t('probeModels')}
+            </button>
+          )
+          : null}
       </div>
       {models.length === 0 ? <p className={styles['modelEmpty']}>{t('modelsEmpty')}</p> : null}
       {models.map((model, index) => (

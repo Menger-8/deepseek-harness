@@ -240,16 +240,38 @@ describe('discoverModels capability probing', () => {
     expect(server.chats).toHaveLength(0)
   })
 
-  it('returns nothing when the picked ids are absent from the listing', async () => {
-    const server = await capServer([])
+  it('probes a picked id directly, without consulting the listing', async () => {
+    let listed = false
+    const controller = new AbortController()
+    const server = await capServer([500], { onListed: () => { listed = true } })
+
+    const models = await discoverModels({
+      baseURL: server.url,
+      probeCapabilities: true,
+      models: ['missing'],
+      signal: controller.signal,
+    })
+
+    // The listing is never fetched: the picked id is asked about directly, so
+    // a hand-typed id the endpoint does not advertise is still answered.
+    expect(listed).toBe(false)
+    expect(models).toHaveLength(1)
+    expect(models[0]).toMatchObject({ id: 'missing', reasoning: { failed: 'HTTP 500' } })
+    expect(server.chats).toHaveLength(1)
+  })
+
+  it('answers a blank pick directly, without any request', async () => {
+    let listed = false
+    const server = await capServer([], { onListed: () => { listed = true } })
 
     const models = await discoverModels({
       baseURL: server.url,
       apiKey: 'probe-key',
       probeCapabilities: true,
-      models: ['missing'],
+      models: [''],
     })
 
+    expect(listed).toBe(false)
     expect(models).toEqual([])
     expect(server.chats).toHaveLength(0)
   })
@@ -304,8 +326,11 @@ describe('discoverModels capability probing', () => {
   it('aborts the probing pass when the caller signal fires after the listing', async () => {
     const controller = new AbortController()
     // The abort lands after the listing response is fully read, so it reaches
-    // the probing workers' own check rather than the listing fetch's.
-    const server = await capServer([200, 200, 200, 200, 200, 200, 200, 200], {
+    // the probing workers' own check rather than the listing fetch's. The
+    // workers' first requests are held open to guarantee the abort lands mid-
+    // probe on any machine, instead of racing the probe's completion.
+    const server = await capServer([], {
+      holdChatOpenMs: true,
       onListed: () => { setTimeout(() => { controller.abort() }, 100) },
     })
 

@@ -10,11 +10,13 @@ Status: implemented
 
 ## 决定
 
-**发现能力获得一个可选的能力探测。** `LlmModelDiscoveryRequest` 携带 `probeCapabilities` 与 `models`（被勾选的 id；探测只针对它们运行，因此列出三十个模型的网关只花几次请求，而不是每行一次），`LlmDiscoveredModel` 携带 `reasoning` 结论：`efforts`（`{ 档位: 线上拼写 }`，可直接存为 `reasoningEfforts`）、`developerRole`（`accepted`/`rejected`）、探测不得不确定时的 `thinkingFormat` 与 `maxTokensField`，以及简短的 `failed` 原因。
+**发现能力获得一个可选的能力探测。** `LlmModelDiscoveryRequest` 携带 `probeCapabilities` 与 `models`（被勾选的 id；探测只针对它们运行，因此列出三十个模型的网关只花几次请求，而不是每行一次），`LlmDiscoveredModel` 携带 `reasoning` 结论：`efforts`（`{ 档位: 线上拼写 }`，可直接存为 `reasoningEfforts`）、`developerRole`（`accepted`/`rejected`）、探测不得不确定时的 `thinkingFormat` 与 `maxTokensField`，以及简短的 `failed` 原因。命名了勾选 id 时，直接针对这些 id 发问、根本不请求列表，因此端点未公布的、手打的 id 也能得到回答；未收窄的请求则探测列出的每个模型。
 
 **探测就是把手工流程自动化并有界化**（`dsh-llm-pi-ai/src/probe.ts`）：一个基线请求决定输出上限字段（`max_completion_tokens` 被拒时重试一次 `max_tokens`），每档一次请求（`high`、`max`）决定提供哪些档位，OpenAI 方言被拒时回退到 DeepSeek 的 `thinking.type` 方言，最后一个 `developer` 角色请求决定该事实。每个裁决都是 HTTP 状态码——2xx 接受、400 拒绝该参数、其余只让该模型的探测以简短原因失败——因此被拒的参数绝不会被误认为端点不可达。每个请求受自身 20 秒超时与调用方信号的联合约束；列表之后的取消会以 `ABORTED` 中止探测段。探测只存在于 `openai-completions`——唯一具备对话形状的协议；其他协议保持列表回答、不带结论，而 catalog 路由仍从自己的注册表作答、不做探测。
 
 **写事实的是采纳界面，不是操作者。** Models 页在用户点击「添加所选」时探测被勾选的候选（采纳是用户已决定写入的唯一时刻，所以探测搭既有往返的便车，而不是新增按钮），随后每行带着自己的 `reasoningEfforts` 被采纳，路由事实合并进 profile 的 `compat` 块——新的实证事实覆盖同字段的过时手写值。探测失败绝不阻塞采纳：行以无档位方式加入，拒绝被展示出来，与探测之前的姿态完全一致。
+
+**手写行同样按需获得探测。** Models 页的第二个动作——「探测所选模型」——按行内已填写的 id 探测（每个非空 id 一次），把确认的档位写回各行的 `reasoningEfforts`；探测完成且一档未确认时，清除过时的手写集合；失败或未被探测的行原样保留。该动作只在表单填写了端点时出现，并复用采纳路径对 `compat` 的路由事实合并。
 
 ## 备选方案
 
@@ -33,6 +35,6 @@ Status: implemented
 
 ## 测试
 
-`packages/llm/llm-pi-ai/tests/probe.spec.ts` 对着脚本化端点驱动探测：每个档位／方言／上限字段裁决、developer 角色的接受与拒绝、按模型的失败（服务器错误、拒绝、不可达、中止、超时）以及无凭据草稿。发现层的用例覆盖勾选 id 过滤、空勾选、协议门禁与列表之后对探测段的中止。`packages/llm/llm/tests/topology.spec.ts` 钉住携带 `reasoning` 的服务投影；`packages/host/apiproxy/tests` 钉住线协议 schema 与 handler 透传。`packages/client/ui-settings-models/tests/provider-form.client.spec.tsx` 覆盖采纳时探测：事实写进行与 `compat`、拒绝与传输失败降级为普通采纳、空勾选跳过探测，以及带键入密钥的 create 卡片草稿。
+`packages/llm/llm-pi-ai/tests/probe.spec.ts` 对着脚本化端点驱动探测：每个档位／方言／上限字段裁决、developer 角色的接受与拒绝、按模型的失败（服务器错误、拒绝、不可达、中止、超时）以及无凭据草稿。发现层的用例覆盖不请求列表的直接勾选 id 探测、空勾选不经任何请求直接回答、协议门禁与探测中途落地的中止令整段失败。`packages/llm/llm/tests/topology.spec.ts` 钉住携带 `reasoning` 的服务投影；`packages/host/apiproxy/tests` 钉住线协议 schema 与 handler 透传。`packages/client/ui-settings-models/tests/provider-form.client.spec.tsx` 覆盖采纳时探测：事实写进行与 `compat`、拒绝与传输失败降级为普通采纳、空勾选跳过探测，以及带键入密钥的 create 卡片草稿。行探测单独覆盖：档位写回手写行、一档未确认时清除过时集合、失败与未探测的行原样保留、拒绝与传输失败被点名，以及按钮的可用条件（需端点、需至少一个非空 id）。
 
 同一套探测流程在实现前对火山方舟与 kmust 网关实测过，记录在 `probe-ark-thinking.ps1` 中，并继续作为未来预设贡献的判定模板。
