@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-llm-gateway-presets",
-  "description": "Hostname-keyed gateway compat presets for the dsh-llm-pi-ai adapter (Volcengine Ark shipped)",
+  "description": "Hostname-keyed gateway compat presets for the dsh-llm-pi-ai adapter: any third-party OpenAI-compatible gateway gets its dialect facts pinned (Volcengine Ark shipped as the first verified entry)",
   "version": "0.1.0-rc.5",
   "publishConfig": {
     "access": "public"
